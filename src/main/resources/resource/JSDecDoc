@@ -1,0 +1,4 @@
+数值取小数点后几位
+var number = 1.89545595
+number = number.toFixed(2);//toFixed自带四舍五入的功能,toFixed自带补"0"位功能
+number.substr(0,number.indexOf(".")+3)//这种方式没有四舍五入的功能，直接按位截取的，也没有补位功能

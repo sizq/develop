@@ -1,0 +1,15 @@
+1、金额不同币种之间转换
+	CurrencyUtils.java
+		1、betweenRto(Date date, Long compId, String source, String target)
+			参数说明：
+			date:当前日期,不月份有不同的汇率。
+			compId:公司id
+			source:转换前原币种,"CNY"
+			target:目标币种，"USD"
+		2、betweenRto(Date date, Long compId, Long source, Long target)
+			参数说明：
+			date:当前日期,不月份有不同的汇率。
+			compId:公司id
+			source:转换前原币种id,"10010"
+			target:目标币种id，"20100"
+BigDecimal 
