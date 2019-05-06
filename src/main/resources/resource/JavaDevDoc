@@ -12,4 +12,18 @@
 			compId:公司id
 			source:转换前原币种id,"10010"
 			target:目标币种id，"20100"
-BigDecimal 
+2、发送消息
+@Override
+	public boolean SendMessage(String msgbody) {
+		Map<String, String> params = new HashMap<String, String>();
+		params.put("comp_id", "" + this.getCompId());
+		params.put("user_id", "" + this.getUserId());
+		params.put("user_code", "" + this.getUserCode());
+		params.put("user_name", "" + this.getUserName());
+		params.put("body", "" + msgbody);
+		WarOutUpdateStatus o = new WarOutUpdateStatus(this.getCompId(), this.getUserId(), this.getUserCode(),
+				this.getUserName(), logger);
+		o.setParams(params);
+		o.exParams = JSONArray.parseObject(msgbody, Map.class);
+		return o.execute();
+	} 

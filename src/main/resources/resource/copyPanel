@@ -1,0 +1,24 @@
+INSERT INTO `ecs_core_thd_wh` (`thd_prv`, `thd_code`, `thd_name`, `is_stop`, `created`, `modified`, `wh_code`, `wh_name`, `winit_code`, `def_code_two`) 
+VALUES ('16', '302', 'USNY-', b'0', now(), now(), '302', 'USNY-', NULL, 'US');
+
+ThdPrvEnum
+
+ecs_core_thd_prdt_unit	单位表
+ecs_core_thd_prdt_type	分类表
+
+<AutoFormElement>
+	<Property name="name">prdt_unit</Property>
+	<Property name="property">prdt_unit</Property>
+	<Property name="label">计量单位</Property>
+	<Property name="trigger">cddSysPrdtUnit</Property>
+	<Editor/>
+</AutoFormElement>
+
+prdt_type  拿到值直接存储在数据库中
+
+1652
+dtThdMbbPrdtType
+
+
+
+
