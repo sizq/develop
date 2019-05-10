@@ -20,5 +20,46 @@ prdt_type  拿到值直接存储在数据库中
 dtThdMbbPrdtType
 
 
+SysParams.getClsType(compId)
+EcsErpStkMoveImpl.java
+EcsErpStkMoveUtils.java
+
+
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/purchase/utils/EcsErpPurBackUtils.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/purchase/utils/EcsErpPurInUtils.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/qtu/EcsErpSyncDataImpl.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/stock/EcsErpStkResetImpl.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/stock/handlers/head/Instock.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/stock/handlers/head/InstockMark.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/stock/handlers/head/Ship.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/stock/utils/EcsErpStkAsmUtils.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/utils/StockBilListUtils.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/mq/down/utils/OrderDownThd.java
+    Sending        E:/project/workspace/frdas-ecs-provider/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/dao/stock/DAOEcsErpStock.java
+
+海外仓头程
+EcsErpStkHead.java
+Instock.java
+EcsErpStkHead.js
+EcsErpStkHead.view.xml
+
+组装单
+EcsErpStkAsmUtils.java
+EcsErpStkAsm.js
+EcsErpStkAsm.view.xml
+EcsErpStkAsm.java
+
+采购入库单
+EcsErpPurInImpl.java
+EcsErpPurInUtils.java
+EcsErpPurIn.js
+EcsErpPurIn.java
+EcsErpPurIn.view.xml
+
+套包重组单
+EcsErpStkReset.java
+EcsErpStkReset.js
+EcsErpStkReset.view.xml
+EcsErpStkResetImpl.java
 
 
