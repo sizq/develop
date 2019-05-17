@@ -1,0 +1,109 @@
+ <Dialog id="autoSplitOrder">
+      <Property name="caption">设置拆分规则</Property>
+      <Property name="width">770</Property>
+      <Property name="height">400</Property>
+      <Buttons>
+        <Button id="sureOutBtn" layoutConstraint="align:center">
+          <Property name="caption">确定</Property>
+          <Property name="iconClass">stufont icon-yes</Property>
+        </Button>
+        <Button id="cancleOutBtn" layoutConstraint="align:center">
+          <Property name="caption">取消</Property>
+          <Property name="iconClass">stufont icon-close</Property>
+        </Button>
+      </Buttons>
+      <Children>
+        <HtmlContainer layout="hbox" layoutConstraint="rowSpan:2">
+          <Property name="content">&lt;span class=&quot;stufont icon-info&quot; >&lt;/span>亚马逊AFN订单、新蛋SBN订单、速卖通AE仓订单、CD的MKPFBC订单、Lazada的FBL订单不参与拆分计算。拆分商品金额按照商品采购价格*拆分数量算出采购金额占比进行分摊。</Property>
+          <Property name="style">
+            <Property name="padding">20px</Property>
+            <Property name=" "/>
+          </Property>
+        </HtmlContainer>
+        <Container>
+          <Property name="style">
+            <Property name="padding-left">20px</Property>
+            <Property name="padding-right">20px</Property>
+          </Property>
+          <AutoForm>
+            <Property name="cols">*,*,*,*,*,*</Property>
+            <Property name="labelWidth">75</Property>
+            <Property name="width">95%</Property>
+            <AutoFormElement layoutConstraint="colSpan:2">
+              <Property name="label">商品连接符</Property>
+              <Property name="name">prodect_connector</Property>
+              <Property name="property">prodect_connector</Property>
+              <Property name="readOnly">false</Property>
+              <Property name="editable">true</Property>
+              <Editor>
+                <TextEditor>
+                  <Property name="required">true</Property>
+                </TextEditor>
+              </Editor>
+            </AutoFormElement>
+            <AutoFormElement layoutConstraint="colSpan:2">
+              <Property name="label">数量连接符</Property>
+              <Property name="name">count_connector</Property>
+              <Property name="property">count_connector</Property>
+              <Editor>
+                <TextEditor>
+                  <Property name="required">true</Property>
+                </TextEditor>
+              </Editor>
+            </AutoFormElement>
+            <AutoFormElement layoutConstraint="colSpan:2">
+              <Property name="label">商品截取符</Property>
+              <Property name="name">prodect_spliter</Property>
+              <Property name="property">prodect_spliter</Property>
+              <Editor/>
+            </AutoFormElement>
+            <AutoFormElement layoutConstraint="colSpan:3">
+              <Property name="label">适用网店</Property>
+              <Property name="property">applicable_shop</Property>
+              <Property name="name">applicable_shop</Property>
+              <Editor>
+                <RadioGroup>
+                  <RadioButton>
+                    <Property name="text">全部</Property>
+                    <Property name="value">1</Property>
+                  </RadioButton>
+                  <RadioButton>
+                    <Property name="value">2</Property>
+                    <Property name="text">指定网店</Property>
+                  </RadioButton>
+                </RadioGroup>
+              </Editor>
+            </AutoFormElement>
+            <AutoFormElement layoutConstraint="colSpan:3">
+              <Property name="trigger">sysSiteQwind,triggerClear</Property>
+              <Property name="showHint">true</Property>
+              <Property name="showLabel">false</Property>
+              <Editor/>
+            </AutoFormElement>
+            <AutoFormElement layoutConstraint="colSpan:6">
+              <Property name="editable">false</Property>
+              <Property name="width">100%</Property>
+              <Property name="showLabel">false</Property>
+              <Property name="height">150</Property>
+              <Editor>
+                <TextArea>
+                  <Property name="text">
+示例：
+原订单商品信息：SKU1_A#2+SKU2_B+SKU3_C#3 ,数量2
+拆分规则：商品连接符+,商品截取符_,数量标识符#
+下载订单自动拆分后商品信息：
+商品SKU1,数量4
+商品SKU2,数量2
+商品SKU3,数量6                
+                  </Property>
+                </TextArea>
+              </Editor>
+            </AutoFormElement>
+          </AutoForm>
+        </Container>
+      </Children>
+      <Tools/>
+    </Dialog>
+    <QWindTrigger id="sysSiteQwind">
+      <Property name="qwind">SysSite</Property>
+    </QWindTrigger>

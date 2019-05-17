@@ -39,7 +39,9 @@ EcsErpStkMoveUtils.java
 
 海外仓头程
 EcsErpStkHead.java
+/frdas-ecs-web/src/main/java/emgr/main/stock/EcsErpStkHead.java
 Instock.java
+/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/stock/handlers/head/Instock.java
 EcsErpStkHead.js
 EcsErpStkHead.view.xml
 
@@ -62,4 +64,37 @@ EcsErpStkReset.js
 EcsErpStkReset.view.xml
 EcsErpStkResetImpl.java
 
+更改
+DAOEcsErpStock.java
 
+InstockMark.java
+Ship.java
+EcsErpSyncDataImpl.java
+EcsErpPurBackUtils.java
+StockBilListUtils.java
+OrderDownThd.java
+
+商品拆分
+EcsErpSysParams.view.xml
+/frdas-ecs-web/src/main/java/emgr/main/system/EcsErpSysParams.view.xml
+
+EcsErpSysParams.js
+
+web/EcsErpSysParams.java
+/frdas-ecs-web/src/main/java/emgr/main/system/EcsErpSysParams.java
+
+EcsErpSysParamsImpl.java
+/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/impl/system/EcsErpSysParamsImpl.java
+
+DAOEcsErpPrdtSplit.java
+/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/dao/system/DAOEcsErpPrdtSplit.java
+
+IEcsErpSysParams.java
+/frdas-ecs-domain/src/main/java/com/thescm/frdas/ecs/intf/system/IEcsErpSysParams.java
+
+/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/provider/system/EcsErpSysParams.java
+/frdas-ecs-web/frdas-ecs-web/src/main/java/emgr/rmi/system/EcsErpSysParamsHandler.java
+
+OrderDown.java
+AutoSplit.java
+SysParams.java
