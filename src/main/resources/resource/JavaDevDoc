@@ -13,7 +13,7 @@
 			source:转换前原币种id,"10010"
 			target:目标币种id，"20100"
 2、发送消息
-@Override
+	@Override
 	public boolean SendMessage(String msgbody) {
 		Map<String, String> params = new HashMap<String, String>();
 		params.put("comp_id", "" + this.getCompId());
@@ -27,3 +27,29 @@
 		o.exParams = JSONArray.parseObject(msgbody, Map.class);
 		return o.execute();
 	} 
+3、上传图片返回图片系统中存放路径
+	/frdas-ecs-web/frdas-ecs-web/src/main/java/emgr/rmi/system/EcsErpSysSitePrdtHandler.java#searchFile
+
+4、数据类型转换
+	Date modified = DateUtils.parseDate(StringUtils.toString(data.get("modified")), SysConstants.DATE_TIME_FORMAT);
+	Date modified = DateUtils.parseDate(this.getRequest("modified"), "yyyy-MM-dd HH:mm:ss");
+	
+	Map<String, Object> purInMap = this.parseObject(this.getRequestData("data"), Map.class); 
+		第一个参数是json字符串
+		第二个参数传入什么类型，数据返回什么类型
+	JSON.parseObject(json, cls);
+5、数据库连接获取方式
+	1、获取指定公司的连接(包含读写权限)
+	PoolConnection.getCompConnection(compId);
+	2、获取指定公司的连接(仅包含读权限)
+	PoolConnection.getSlaveConnection(compId);
+	3、获取全局连接(包含读写权限,一般业务不用此链接)
+	PoolConnection.getSlaveConnection(compId);
+
+
+
+
+
+
+
+	

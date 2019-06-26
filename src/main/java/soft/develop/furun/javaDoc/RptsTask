@@ -1,0 +1,186 @@
+package com.thescm.frdas.ecs.mq.cloud;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+
+import com.alibaba.druid.pool.DruidPooledConnection;
+import com.alibaba.dubbo.common.logger.Logger;
+import com.alibaba.dubbo.common.logger.LoggerFactory;
+import com.alibaba.fastjson.JSON;
+import com.aliyun.openservices.ons.api.SendResult;
+import com.thescm.commons.db.PoolConnection;
+import com.thescm.commons.mq.MQProducer;
+import com.thescm.commons.utils.StringUtils;
+import com.thescm.frdas.ecs.dao.system.DAOEcsErpSysRptsTask;
+import com.thescm.frdas.ecs.mq.MessageTags;
+import com.thescm.frdas.ecs.utils.MessageBuilder;
+import org.apache.commons.lang.exception.ExceptionUtils;
+
+
+/**
+ * 报表任务
+ * ecs_erp_sys_rpts
+ * @author 
+ */
+public class RptsTask {
+
+    private final Logger logger;
+
+    private Long compId;
+    private Long userId;
+    private String userCode;
+    private String userName;
+
+    public RptsTask(Logger logger) {
+        this.logger = logger;
+        this.compId = -1L;
+        this.userId = -1L;
+        this.userCode = "";
+        this.userName = "";
+    }
+    
+    public RptsTask(Long compId, Long userId, String userCode, String userName){
+        this.logger = LoggerFactory.getLogger(RptsTask.class);
+        this.compId = compId;
+        this.userId = userId;
+        this.userCode = userCode;
+        this.userName = userName;
+    }
+
+
+
+    /**
+     * 发送生成报表消息
+     *
+     * @return
+     */
+    public String SendMessage(String taskId, String params, String paramsMd5) {
+        String errorMsg = "";
+        DruidPooledConnection con = null;
+        DAOEcsErpSysRptsTask dao = null;
+        Long id = null ;
+        try {
+            dao = new DAOEcsErpSysRptsTask(con = PoolConnection.getCompConnection(this.compId), this.compId);
+            Map<String, Object> mapTask = new HashMap<String, Object>();
+            mapTask.put("taskId", taskId);
+            mapTask.put("runStatus", 0);
+            mapTask.put("params", params);
+            mapTask.put("userId", this.userId);
+            mapTask.put("compId", this.compId);
+            mapTask.put("msg", "预计5分钟后可执行完毕。");
+            mapTask.put("params_md5", paramsMd5);
+
+            dao.StartTransaction();
+            id = dao.add(mapTask);
+            dao.CommitTransaction();
+
+            String msg = MessageBuilder.create()
+                .add("tags", taskId)
+                .add("id", id.toString())
+                .add("comp_id", this.compId + "")
+                .add("user_id", this.userId + "")
+                .add("user_code", this.userCode)
+                .add("user_name", this.userName).toJSONString();
+
+//            SendResult result = MQProducer.sendCloudMessage(MessageTags.TAG_CLOUD_REPORT, "", msg);
+//            if (result == null || StringUtils.isEmpty(result.getMessageId())) {
+//                dao.StartTransaction();
+//                dao.delete(id);
+//                dao.CommitTransaction();
+//            }
+            Map<String,String> map = new HashMap<>();
+            map.put("tags", taskId);
+            map.put("id", id.toString());
+            map.put("comp_id", this.compId + "");
+            map.put("user_id", this.userId + "");
+            map.put("user_code", this.userCode);
+            map.put("user_name", this.userName);
+            RptsTask task = new RptsTask(this.compId, this.userId, this.userCode, this.userName);
+            task.execute(map);
+
+        }
+        catch (Exception e) {
+            if (con != null) {
+                if (dao != null) {
+                    try {
+                        dao.RollbackTransaction();
+                    }
+                    catch (SQLException sqle) {
+                    }
+                }
+            }
+            errorMsg = "提交出错,请重新提交试试!";
+            logger.error("ExpTask", e);
+        }
+        finally {
+            if (con != null) {
+                try {
+                    con.close();
+                }
+                catch (SQLException e) {
+                }
+            }
+        }
+        return errorMsg;
+    }
+
+
+    public boolean execute(Map<String,String> params) {
+        boolean result = false;
+        String tags = params.get("tags");        
+        String classpath = "com.thescm.frdas.ecs.mq.cloud.rpts." + tags + "Report";
+        Class<?> cl;
+
+        try {
+            cl = Class.forName(classpath);
+            if (cl != null) {
+                Long compId = StringUtils.toLong(params.get("comp_id"), 0L);
+                Long userId = StringUtils.toLong(params.get("user_id"), 0L);
+                String userCode = StringUtils.toString(params.get("user_code"));
+                String userName = StringUtils.toString(params.get("user_name")); 
+                Long id = StringUtils.toLong(params.get("id"), -1L);
+                Class partypes[] = new Class[5];
+                partypes[0] = Long.class;
+                partypes[1] = Long.class;
+                partypes[2] = String.class;
+                partypes[3] = String.class;
+                partypes[4] = Logger.class;
+                Constructor ct = cl.getConstructor(partypes);
+                if (ct != null) {
+                    Object obj = ct.newInstance(compId, userId, userCode, userName, logger);
+                    Method methd = cl.getMethod("execute", Long.TYPE);
+                    if (Modifier.isPublic(methd.getModifiers())) {
+                    	logger.info("Start" + "[" + tags + "]");
+                        methd.invoke(obj, id);
+                        logger.info("End" + "[" + tags + "]");
+                        result = true;
+                    }
+                }
+            }
+        }
+        catch (ClassNotFoundException e) {
+            logger.info("调用错误：["+tags+"]" + e.toString());
+        }
+        catch (NoSuchMethodException e) {
+            logger.info("调用错误：["+tags+"]" + e.toString());
+        }
+        catch (InstantiationException e) {
+            logger.info("调用错误：["+tags+"]" + ExceptionUtils.getStackTrace(e));
+        }
+        catch (IllegalAccessException e) {
+            logger.info("调用错误：["+tags+"]" + ExceptionUtils.getStackTrace(e));
+        }
+        catch (InvocationTargetException e) {
+            logger.info("调用错误：["+tags+"]" + ExceptionUtils.getStackTrace(e));
+        }
+        catch (Exception e) {
+            logger.info("调用错误：["+tags+"]" + ExceptionUtils.getStackTrace(e));
+        }
+        return result;
+    }
+}

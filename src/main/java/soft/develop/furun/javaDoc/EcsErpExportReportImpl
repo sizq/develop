@@ -1,0 +1,292 @@
+package com.thescm.frdas.ecs.impl.reports;
+
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import com.alibaba.druid.pool.DruidPooledConnection;
+import com.alibaba.dubbo.common.logger.Logger;
+import com.alibaba.dubbo.common.logger.LoggerFactory;
+import com.alibaba.fastjson.JSON;
+import com.thescm.commons.db.PoolConnection;
+import com.thescm.commons.db.SQLHelper;
+import com.thescm.commons.inner.Response;
+import com.thescm.commons.utils.DateUtils;
+import com.thescm.commons.utils.ReturnCode;
+import com.thescm.commons.utils.StringUtils;
+import com.thescm.frdas.ecs.dao.system.DAOEcsErpSysExportTask;
+import com.thescm.frdas.ecs.domain.system.EcsErpSysExportTask;
+import com.thescm.frdas.ecs.impl.BaseService;
+import com.thescm.frdas.ecs.mq.cloud.ExpTask;
+import com.thescm.frdas.ecs.mq.cloud.ImpTask;
+import com.thescm.frdas.ecs.mq.cloud.exp.EcsErpPurOrderCheckExport;
+
+public class EcsErpExportReportImpl extends BaseService {
+	private static final Logger logger = LoggerFactory.getLogger(EcsErpExportReportImpl.class);
+
+	public Response<Boolean> getTaskStatus() {
+		Response<Boolean> response = new Response<Boolean>();
+		Map<String, String> data = this.getRequestData();
+		String taskId = data.get("task_id");
+
+		Long compId = this.getCompId();
+		String sql = "SELECT run_status FROM ecs_erp_sys_export_task o WHERE o.comp_id = ? AND user_id = ? AND o.task_id = ?  ORDER BY created DESC LIMIT 1";
+		DruidPooledConnection con = null;
+		try {
+			con = getCompConnection();
+			Integer status = (Integer) SQLHelper.ExecuteScalar(con, sql,
+					new Object[] { compId, this.getUserId(), taskId });
+			response.setData(null != status && status < 2);
+			response.setCode(ReturnCode.SUCCESS);
+		} catch (Exception e) {
+			response.setMsg("服务器异常...");
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+			logger.error(e);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+	}
+
+	public Response<String> addExpTask() {
+		Response<String> response = new Response<String>();
+		Long compId = this.getCompId();
+		Map<String, String> data = this.getRequestData();
+		String taskId = data.get("task_id");
+		Boolean isOpen = StringUtils.toBoolean(data.get("is_open"));
+		String params = data.get("params");
+		String exportType = StringUtils.toString(data.get("export_type"));
+		if(!StringUtils.isEmpty(exportType) && params.indexOf("[") != -1){
+			List<Map> listParams = JSON.parseArray(params, Map.class);
+			List<Map> locParamsList = new ArrayList<Map>();
+			for(Map paramsMap:listParams){
+				paramsMap.put("export_type", exportType);
+				locParamsList.add(paramsMap);
+			}
+			params = JSON.toJSONString(locParamsList);
+		}else if(!StringUtils.isEmpty(exportType) && params.indexOf("[") == -1){
+			Map pparams = JSON.parseObject(params, Map.class);
+			pparams.put("export_type", exportType);
+			params = JSON.toJSONString(pparams);
+		}
+		DruidPooledConnection con = null;
+		try {
+			con = getCompConnection();
+			if(!isOpen){
+				Object obj = SQLHelper.ExecuteScalar(con, "SELECT 1 FROM ecs_erp_sys_export_task o "
+						+ "WHERE o.comp_id = ? AND user_id = ? AND o.task_id = ? AND created > ? "
+						+ "ORDER BY created DESC LIMIT 1",
+						new Object[] { compId, this.getUserId(), taskId, DateUtils.getCurrentDateForMinutes(-5)});
+//				if (null != obj) {
+//					response.setMsg("操作过于频繁，请5分钟之后重试！");
+//					response.setCode(ReturnCode.SYSTEM_ERROR);
+//					return response;
+//				}
+				
+				obj = SQLHelper.ExecuteScalar(con, "SELECT 1 FROM ecs_erp_sys_export_task o "
+						+ "WHERE o.comp_id = ? AND user_id = ? AND o.task_id = ? AND created > ? AND run_status <= 1 "
+						+ "ORDER BY created DESC LIMIT 1",
+						new Object[] { compId, this.getUserId(), taskId, DateUtils.getCurrentDateForHour(-2)});
+//				if (null != obj) {
+//					response.setMsg("存在未执行完成的任务，请等待任务完成之后再提交!");
+//					response.setCode(ReturnCode.SYSTEM_ERROR);
+//					return response;
+//				}
+			}
+			EcsErpPurOrderCheckExport checkExport = new  EcsErpPurOrderCheckExport(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName(),logger);
+			Long id = this.getId(taskId, params);
+			checkExport.execute(id);
+//            ExpTask task = new ExpTask(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName());
+//            String  rs = task.SendMessage(taskId, params);
+            /*
+			if(taskId.equals("OrderTrack")){
+                rs = ReportJobBase.addQueueTask(this.getCompId(), this.getUserId(), this.getUserCode(),this.getUserName(),
+                    taskId, params, "OrderTrackExport");
+            } else {
+                ExpTask task = new ExpTask(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName());
+                rs = task.SendMessage(taskId, params);
+            }*/
+
+//			if (!StringUtils.isEmpty(rs)) {
+//				response.setMsg(rs);
+//				response.setCode(ReturnCode.SYSTEM_ERROR);
+//			} else {
+//				response.setCode(ReturnCode.SUCCESS);
+//			}
+		} catch (Exception e) {
+			logger.error(e);
+			response.setMsg("服务器异常...");
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+	}
+
+	public Response<String> addImpTask() {
+		Response<String> response = new Response<String>();
+		Map<String, String> data = this.getRequestData();
+		String taskId = data.get("task_id");
+		String params = data.get("params");
+		Long compId = this.getCompId();
+		DruidPooledConnection con = null;
+		try {
+			con = getCompConnection();
+			Object obj = SQLHelper.ExecuteScalar(con, "SELECT 1 FROM ecs_erp_sys_export_task o "
+					+ "WHERE o.comp_id = ? AND user_id = ? AND o.task_id = ? AND run_status = ? AND created > ? "
+					+ "ORDER BY created DESC LIMIT 1 ",
+					new Object[] { compId, this.getUserId(), taskId, 0, DateUtils.getCurrentDateForMinutes(-2) });
+			if (null != obj) {
+				response.setMsg("操作过于频繁，请稍后重试.");
+				response.setCode(ReturnCode.SYSTEM_ERROR);
+				return response;
+			}
+			ImpTask task = new ImpTask(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName());
+			String rs = task.SendMessgae(taskId, params);
+				
+			if (!StringUtils.isEmpty(rs)) {
+				response.setMsg(rs);
+				response.setCode(ReturnCode.SYSTEM_ERROR);
+			} else {
+				response.setCode(ReturnCode.SUCCESS);
+			}
+		} catch (Exception e) {
+			logger.error(e);
+			response.setMsg("服务器异常...");
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+	}
+
+	public Response<List<Map<String, Object>>> getTask() {
+		Response<List<Map<String, Object>>> response = new Response<List<Map<String, Object>>>();
+		String sql = "SELECT msg,run_status, created, return_url, job_id, params FROM ecs_erp_sys_export_task "
+				+ "WHERE comp_id = ?  and user_id = ? AND task_id = ? ORDER BY created DESC LIMIT 10";
+		String taskId = this.getRequestData("task_id");
+		DruidPooledConnection con = null;
+		try {
+			con = this.getCompConnection();
+			ArrayList<Map<String, Object>> list = SQLHelper.ExecuteReaderMaps(con, sql,
+					new Object[] { this.getCompId(), this.getUserId(), taskId });
+			response.setData(list);
+			response.setCode(ReturnCode.SUCCESS);
+		} catch (Exception e) {
+			logger.error(e);
+			response.setMsg("服务器异常...");
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+	}
+
+	public Response<Map<String,Object>> addImpTaskOutMap() {
+		Response<Map<String,Object>> response = new Response<>();
+		Map<String, String> data = this.getRequestData();
+		String taskId = data.get("task_id");
+		String params = data.get("params");
+		Long compId = this.getCompId();
+		DruidPooledConnection con = null;
+		try {
+			con = getCompConnection();
+			Object obj = SQLHelper.ExecuteScalar(con, "SELECT 1 FROM ecs_erp_sys_export_task o "
+							+ "WHERE o.comp_id = ? AND user_id = ? AND o.task_id = ? AND run_status = ? AND created > ? "
+							+ "ORDER BY created DESC LIMIT 1 ",
+					new Object[] { compId, this.getUserId(), taskId, 0, DateUtils.getCurrentDateForMinutes(-2) });
+			if (null != obj) {
+				response.setMsg("操作过于频繁，请稍后重试.");
+				response.setCode(ReturnCode.SYSTEM_ERROR);
+				return response;
+			}
+			ImpTask task = new ImpTask(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName());
+			Map<String,Object> map = new HashMap<>();
+			String rs = task.SendMessgae(taskId, params,map);
+
+			if (!StringUtils.isEmpty(rs)) {
+				response.setMsg(rs);
+				response.setCode(ReturnCode.SYSTEM_ERROR);
+			} else {
+				response.setData(map);
+				response.setCode(ReturnCode.SUCCESS);
+			}
+		} catch (Exception e) {
+			logger.error(e);
+			response.setMsg("服务器异常...");
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+	}
+
+    public Response<List<Map<String,Object>>> getTaskById() {
+		Response<List<Map<String, Object>>> response = new Response<List<Map<String, Object>>>();
+		String sql = "SELECT msg,run_status, created, return_url, job_id FROM ecs_erp_sys_export_task "
+				+ "WHERE comp_id = ? and id = ? and user_id = ? AND task_id = ? ORDER BY created DESC LIMIT 10";
+		String taskId = this.getRequestData("task_id");
+		String id = this.getRequestData("id");
+		DruidPooledConnection con = null;
+		try {
+			con = this.getCompConnection();
+			ArrayList<Map<String, Object>> list = SQLHelper.ExecuteReaderMaps(con, sql,
+					new Object[] { this.getCompId(),id, this.getUserId(), taskId });
+			response.setData(list);
+			response.setCode(ReturnCode.SUCCESS);
+		} catch (Exception e) {
+			logger.error(e);
+			response.setMsg("服务器异常...");
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+    }
+    private Long getId(String taskId, String params){
+        DruidPooledConnection con = null;
+        DAOEcsErpSysExportTask dao = null;
+// ExpTask task = new ExpTask(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName());
+        try {
+            dao = new DAOEcsErpSysExportTask(con = PoolConnection.getCompConnection(this.getCompId()), this.getCompId());
+            EcsErpSysExportTask tmp = new EcsErpSysExportTask();
+            tmp.setTaskId(taskId);
+            tmp.setRunStatus(0);
+            tmp.setParams(params);
+            tmp.setCreated(DateUtils.getCurrentDateTime());
+            tmp.setModified(tmp.getCreated());
+            tmp.setUserId(this.getUserId());
+            tmp.setCompId(this.getCompId());
+            tmp.setMsg("预计5分钟后可执行完毕。");
+            
+            dao.StartTransaction();
+            Long id = dao.add(tmp);
+            dao.CommitTransaction();
+            return id;
+        }
+        catch (Exception e) {
+            if (con != null) {
+                if (dao != null) {
+                    try {
+                        dao.RollbackTransaction();
+                    }
+                    catch (SQLException sqle) {
+                    }
+                }
+            }
+            logger.error("ExpTask", e);
+        }
+        finally {
+            if (con != null) {
+                try {
+                    con.close();
+                }
+                catch (SQLException e) {
+                }
+            }
+        }
+		return null;
+    }
+}

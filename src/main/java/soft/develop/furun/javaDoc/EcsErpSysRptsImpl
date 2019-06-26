@@ -1,0 +1,286 @@
+package com.thescm.frdas.ecs.impl.reports;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import com.alibaba.druid.pool.DruidPooledConnection;
+import com.alibaba.dubbo.common.logger.Logger;
+import com.alibaba.dubbo.common.logger.LoggerFactory;
+import com.alibaba.fastjson.JSON;
+import com.thescm.commons.db.PageUtils;
+import com.thescm.commons.inner.PageData;
+import com.thescm.commons.inner.Response;
+import com.thescm.commons.utils.DateUtils;
+import com.thescm.commons.utils.ReturnCode;
+import com.thescm.commons.utils.StringUtils;
+import com.thescm.commons.utils.aliyun.AliOSSManager;
+import com.thescm.frdas.ecs.dao.DAOEcsBase;
+import com.thescm.frdas.ecs.dao.reports.DAOEcsErpSysRpts;
+import com.thescm.frdas.ecs.impl.BaseService;
+import com.thescm.frdas.ecs.mq.cloud.RptsTask;
+import com.thescm.frdas.ecs.utils.SysParams;
+
+public class EcsErpSysRptsImpl extends BaseService {
+	private static final Logger logger = LoggerFactory.getLogger(EcsErpSysRptsImpl.class);
+
+	public Response<PageData> get() {
+		Response<PageData> response = new Response<PageData>();
+		Map<String, String> data = this.getRequestData();
+		Long compId = this.getCompId();
+		String taskId = data.get("task_id");
+		String scope = data.get("scope");
+
+		DruidPooledConnection con = null;
+		DAOEcsErpSysRpts dao = null;
+		try {
+			// 查询10条报表任务信息
+			dao = new DAOEcsErpSysRpts(con = this.getCompConnection(), this.getCompId());
+			StringBuilder sql = new StringBuilder();
+			
+			PageUtils page = null;
+			if ("company".equals(scope)) {
+				sql.append(" SELECT id,comp_id, user_id , created,");
+				sql.append(" total_count, total_page, start_time, end_time,return_url,run_status,msg,params, job_id ");
+				sql.append(" FROM ecs_erp_sys_rpts WHERE comp_id = ? AND task_id = ? ORDER BY created DESC  ");
+				page = dao.GetPageData(1, 10, sql, new Object[] { compId,  taskId });
+			} else {
+				sql.append(" SELECT id,comp_id, user_id , created,");
+				sql.append(" total_count, total_page, start_time, end_time,return_url,run_status,msg,params, job_id ");
+				sql.append(" FROM ecs_erp_sys_rpts WHERE comp_id = ? AND user_id = ? AND task_id = ? ORDER BY created DESC  ");
+				page = dao.GetPageData(1, 10, sql, new Object[] { compId, this.getUserId(), taskId });
+			}
+			List<Map<String, Object>> list = page.getData();
+			// 根据对应的查询参数拼装查询条件
+			for (Map<String, Object> map : list) {
+				String args = StringUtils.toString(map.get("params"));
+				Map qryArgs = JSON.parseObject(args, Map.class);
+				if (qryArgs != null) {
+					map.put("query_param", qryArgs.get("qry_content"));
+				}
+			}
+			response.setData(page.toPageData());
+			response.setCode(ReturnCode.SUCCESS);
+		} catch (Exception e) {
+			logger.error(e);
+			response.setMsg(e.getMessage());
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+	}
+
+	/**
+	 * 生成报表
+	 * 
+	 * @return
+	 */
+	public Response<Object> genReport() {
+		Response<Object> response = new Response<Object>();
+
+		Map<String, String> data = this.getRequestData();
+		String tags = data.get("task_id");
+		String params = data.get("params");
+		String paramsMD5 = StringUtils.md5(params);
+
+		DAOEcsBase dao = null;
+		DruidPooledConnection con = null;
+		try {
+			dao = new DAOEcsBase(con = this.getCompConnection(), this.getCompId());
+			List<Object> paras = new ArrayList<Object>();
+
+			// 1.检测12小时内存在未执行完成任务
+			StringBuilder sql = new StringBuilder();
+			sql.append("SELECT 1 FROM ecs_erp_sys_rpts WHERE comp_id = ? AND user_id = ?");
+			sql.append(" AND task_id = ? AND run_status in (0,1) AND created >= ? AND created <= ? LIMIT 1;");
+			paras.clear();
+			paras.add(this.getCompId());
+			paras.add(this.getUserId());
+			paras.add(tags);
+			paras.add(DateUtils.getCurrentDateForHour(-12));
+			paras.add(DateUtils.getCurrentDateTime());
+			Object result = dao.ExecuteScalar(sql.toString(), paras.toArray());
+//			if (result != null) {
+//				response.setMsg("存在未执行完成的任务，请等待任务完成之后再提交!");
+//				response.setCode(ReturnCode.SYSTEM_ERROR);
+//				return response;
+//			}
+
+			// 2.检测条件是否已存在
+			sql.setLength(0);
+			sql.append("SELECT 1 FROM ecs_erp_sys_rpts WHERE comp_id = ? AND user_id = ?");
+			sql.append(
+					" AND task_id = ? AND created >= ? AND created <= ? AND run_status = 2 AND params_md5 = ? LIMIT 1;");
+			paras.clear();
+			paras.add(this.getCompId());
+			paras.add(this.getUserId());
+			paras.add(tags);
+			Integer ms = 45;
+			if("EcsErpTBCSalIncome".equals(tags)){
+                paras.add(DateUtils.getCurrentDateForMinutes(-5));
+                ms = 5;
+            } else {
+                paras.add(DateUtils.getCurrentDateForMinutes(-45));
+            }
+			paras.add(DateUtils.getCurrentDateTime());
+			paras.add(paramsMD5);
+
+			result = dao.ExecuteScalar(sql.toString(), paras.toArray());
+//			if (result != null) {
+//				response.setMsg("已存在相同查询条件的任务，请在"+ms+"分钟之后再提交!");
+//				response.setCode(ReturnCode.SYSTEM_ERROR);
+//				return response;
+//			}
+
+			RptsTask task = new RptsTask(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName());
+			String rs = task.SendMessage(tags, params, paramsMD5);
+			if (!StringUtils.isEmpty(rs)) {
+				response.setMsg(rs);
+				response.setCode(ReturnCode.SYSTEM_ERROR);
+			} else {
+				response.setCode(ReturnCode.SUCCESS);
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (SQLException e) {
+				}
+			}
+		}
+		return response;
+	}
+
+	public Response<PageData> getReport() {
+		Response<PageData> response = new Response<PageData>();
+		Long compId = this.getCompId();
+		Map<String, String> args = this.getRequestData();
+		String id = args.get("id");
+		String pageNo = args.get("page_no");
+
+		DruidPooledConnection con = null;
+		DAOEcsBase dao = null;
+		try {
+			if (!StringUtils.isEmpty(id)) {
+				dao = new DAOEcsBase(con = this.getCompConnection(), this.getCompId());
+				StringBuffer sql = new StringBuffer();
+				sql.append("SELECT id,comp_id, user_id , created,");
+				sql.append("total_count, total_page, start_time, end_time,return_url, job_id ");
+				sql.append(" FROM ecs_erp_sys_rpts WHERE comp_id=? AND id=? ;");
+				List<Map<String, Object>> rptsList = dao.ExecuteReaderMaps(sql.toString(), new Object[] { compId, id });
+
+				PageUtils pg = new PageUtils(1, 50);
+				String returnUrl = null;
+				if (rptsList != null && rptsList.size() > 0) {
+					Map<String, Object> map = rptsList.get(0);
+					pg.setTotalCount((long) map.get("total_count"));
+					returnUrl = (String) map.get("return_url");
+					pg.setPageSize(10);
+				}
+				InputStream in = AliOSSManager.getPrivate(StringUtils.join(returnUrl, "_", pageNo, ".txt"));
+				String jsonStr = readerReportFile(in);
+				List<Map> list = null;
+				if (!StringUtils.isEmpty(jsonStr)) {
+					list = this.parseArray(jsonStr, Map.class);
+					pg.setData(new ArrayList(list));
+				}
+				response.setData(pg.toPageData());
+			}
+			response.setCode(ReturnCode.SUCCESS);
+		} catch (Exception e) {
+			logger.error(e);
+			response.setMsg(e.getMessage());
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+	}
+
+	/**
+	 * 读取文件
+	 * 
+	 * @param in
+	 * @return
+	 */
+	private String readerReportFile(InputStream in) {
+		BufferedReader input = null;
+		StringBuilder jsonStr = new StringBuilder();
+		try {
+			if (in != null) {
+				input = new BufferedReader(new InputStreamReader(in));
+				String line = null;
+				while ((line = input.readLine()) != null) {
+					jsonStr.append(line);
+				}
+				input.close();
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		} finally {
+			if (input != null) {
+				try {
+					input.close();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+			}
+		}
+		return jsonStr.toString();
+	}
+
+	/**
+	 * 获取对应报表的汇总数据
+	 * 
+	 * @return
+	 */
+	public Response<String> getCount() {
+		Response<String> response = new Response<String>();
+		Long compId = this.getCompId();
+		Map<String, String> args = this.getRequestData();
+		String id = args.get("id");
+		DruidPooledConnection con = null;
+		DAOEcsBase dao = null;
+		try {
+			dao = new DAOEcsBase(con = this.getCompConnection(), this.getCompId());
+			String sumtext = (String) dao.ExecuteScalar(
+					"SELECT o.sumtext FROM ecs_erp_sys_rpts o WHERE o.comp_id = ? AND o.id = ? LIMIT 1 ",
+					new Object[] { compId, id });
+			response.setData(sumtext);
+			response.setCode(ReturnCode.SUCCESS);
+		} catch (Exception e) {
+			logger.error(e);
+			response.setMsg(e.getMessage());
+			response.setCode(ReturnCode.SYSTEM_ERROR);
+		} finally {
+			this.CloseConnection(con);
+		}
+		return response;
+	}
+
+	/**
+	 * 获取系统参数中“采购单价金额小数位”。
+	 * 
+	 * @return
+	 */
+	public Response<Map<String, Object>> getElement() {
+		Response<Map<String, Object>> response = new Response<Map<String, Object>>();
+		Integer purDigits = SysParams.getPurDigits(this.getCompId());
+		Integer purUpDigits = SysParams.getPurUpDigits(this.getCompId());
+		Map<String, Object> rs = new HashMap();
+		rs.put("purDigits", purDigits);
+		rs.put("purUpDigits", purUpDigits);
+		response.setData(rs);
+		response.setCode(ReturnCode.SUCCESS);
+		return response;
+	}
+}

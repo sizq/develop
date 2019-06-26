@@ -1,0 +1,4 @@
+1、视图获取按钮权限
+<Property name="metaData">
+  <Property name="securityTag">emgr.main.system.EcsErpSysPrdtPicBatchImpt</Property>
+</Property>

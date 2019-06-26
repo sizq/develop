@@ -1,15 +1,36 @@
 package soft.develop;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.DecimalFormat;
 
 public class FormatBigDecimal {
 	public static void main(String[] args) {
-		//formatBigdecimal();
-		double number = 0.000000;
-		BigDecimal bd=new BigDecimal(number);
-		boolean compare = compare(bd,BigDecimal.ZERO);
-		System.out.println(compare);
+//		//formatBigdecimal();
+//		double number = 0.000000;
+		BigDecimal feeVolume = new BigDecimal("-9998652.6957144");
+		BigDecimal volumeModulus = new BigDecimal("-10");
+		BigDecimal feeWeight = new BigDecimal("20");
+		BigDecimal volumeTotal = new BigDecimal("30");
+//		boolean compare = compare(bd,BigDecimal.ZERO);
+//		System.out.println(compare);
+//		System.out.println(bd);
+		BigDecimal vw = feeVolume.multiply(new BigDecimal(100*100*100)).divide(volumeModulus, 3, RoundingMode.HALF_UP);
+		String shareType = "weight";
+		if(feeWeight.compareTo(vw) < 0){
+			shareType = "volume";
+		}
+		volumeTotal = volumeTotal.divide(new BigDecimal(100*100*100), 6, RoundingMode.HALF_UP);
+		
+		
+		BigDecimal subtract = feeVolume.divide(volumeModulus,2);
+		
+		BigDecimal multiply = subtract.multiply(feeWeight);
+		System.out.println(subtract);
+		System.out.println(multiply);
+		
+		
+		
 	}
 	
 	

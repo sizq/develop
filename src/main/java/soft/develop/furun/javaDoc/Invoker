@@ -1,0 +1,36 @@
+package com.thescm.frdas.ecs.debug;
+
+import java.io.File;
+import java.io.FileInputStream;
+
+import com.alibaba.dubbo.container.Main;
+
+
+public class Invoker {
+    public static void main(String[] args) {
+
+    	 String filePath = "E:/project/workspace/frdas-ecs/src/main/resources";
+         
+         try {
+             //加载配置文件
+             System.getProperties().load(
+                 new FileInputStream(
+                     new File(""+filePath+"/conf/dubbo.properties")
+                     )
+                 );
+             System.setProperty("dubbo.dbconfig.file", ""+filePath+"/conf/dbconfig.properties");
+             System.setProperty("dubbo.sysconf.file",""+filePath+"/conf/sysconf.properties");
+             System.setProperty("dubbo.host.file",""+filePath+"/conf/dubbo-host.properties");
+             System.setProperty("dubbo.registry.file",""+filePath+"/data/dubbo/dubbo.cache");
+             System.setProperty("dubbo.log4j.file",""+filePath+"/logs/dubbo/cloudserver.provider.log");
+             System.setProperty("dubbo.rootpath",filePath);
+
+             Main.main(args);
+         }
+         catch (Exception e) { 
+         	System.out.println(e);
+         }
+
+    }
+
+}
