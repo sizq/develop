@@ -25,8 +25,22 @@ public class StringTest {
 		// org.apache.commons.lang.StringUtils;
 		// StringUtils.isNumeric("aaa123456789");
 		
-		boolean b = areNotEmpty("1","eqw","45fsdfa","213","1",null);
-		System.out.println(b);
+//		boolean b = areNotEmpty("1","eqw","45fsdfa","213","1",null);
+//		System.out.println(b);
+		
+		
+		
+//		String a ="afsdgagae4taerg";
+//		String b = "4";
+//		int i = a.indexOf(b);
+//		boolean concat = a.contains(b);
+//		System.out.println(i+" : "+concat);
+		
+		Integer a =1;
+		int b = 1;
+		if (a==1) {
+			System.out.println("相等");
+		}
 		
 		
 

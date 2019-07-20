@@ -19,9 +19,8 @@ import com.thescm.commons.utils.StringUtils;
 import com.thescm.frdas.ecs.dao.system.DAOEcsErpSysExportTask;
 import com.thescm.frdas.ecs.domain.system.EcsErpSysExportTask;
 import com.thescm.frdas.ecs.impl.BaseService;
-import com.thescm.frdas.ecs.mq.cloud.ExpTask;
 import com.thescm.frdas.ecs.mq.cloud.ImpTask;
-import com.thescm.frdas.ecs.mq.cloud.exp.EcsErpPurOrderCheckExport;
+import com.thescm.frdas.ecs.mq.cloud.exp.EcsErpPurByOrderAuditedExport;
 
 public class EcsErpExportReportImpl extends BaseService {
 	private static final Logger logger = LoggerFactory.getLogger(EcsErpExportReportImpl.class);
@@ -95,7 +94,9 @@ public class EcsErpExportReportImpl extends BaseService {
 //					return response;
 //				}
 			}
-			EcsErpPurOrderCheckExport checkExport = new  EcsErpPurOrderCheckExport(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName(),logger);
+//			EcsErpPurOrderCheckExport checkExport = new  EcsErpPurOrderCheckExport(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName(),logger);
+//			EcsErpPurByOrderExport checkExport = new  EcsErpPurByOrderExport(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName(),logger);
+			EcsErpPurByOrderAuditedExport checkExport = new  EcsErpPurByOrderAuditedExport(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName(),logger);
 			Long id = this.getId(taskId, params);
 			checkExport.execute(id);
 //            ExpTask task = new ExpTask(this.getCompId(), this.getUserId(), this.getUserCode(), this.getUserName());

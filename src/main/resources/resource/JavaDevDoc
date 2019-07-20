@@ -46,9 +46,12 @@
 	3、获取全局连接(包含读写权限,一般业务不用此链接)
 	PoolConnection.getSlaveConnection(compId);
 
+6、日志记录
+	LoggerFactory.getLogger(类名.class);
 
-
-
+7、权限：
+	后台判断是否存在指定权限
+	boolean cstRight = dao.getRightForMenu(this.getUserId(), "emgr.main.stock.EcsErpStock", "Cst");
 
 
 
