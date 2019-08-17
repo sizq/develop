@@ -1,0 +1,356 @@
+package com.thescm.frdas.ecs.running.auto.services.order;
+
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import com.alibaba.druid.pool.DruidPooledConnection;
+import com.alibaba.dubbo.common.logger.Logger;
+import com.alibaba.dubbo.common.logger.LoggerFactory;
+import com.thescm.commons.dao.DAOBase;
+import com.thescm.commons.db.PoolConnection;
+import com.thescm.commons.utils.DateUtils;
+import com.thescm.commons.utils.StringUtils;
+import com.thescm.frdas.ecs.cache.EcsErpSysBankCache;
+import com.thescm.frdas.ecs.cache.EcsErpSysSiteCache;
+import com.thescm.frdas.ecs.domain.system.EcsErpSysBank;
+import com.thescm.frdas.ecs.domain.system.EcsErpSysSite;
+
+/**
+ * 
+ * @author lidj
+ */
+public class DownLoadService {
+
+	private static final Logger logger = LoggerFactory.getLogger(DownLoadService.class);
+
+	private Long comp_id = 0L;
+
+	/* 锁 */
+	private final ReadWriteLock lock = new ReentrantReadWriteLock();
+
+	/* 订单下载队列volatile */
+	private volatile ConcurrentHashMap<Long, DownLoadOrders> downloadorder;
+
+	/* 锁 */
+	private final ReadWriteLock paypalLock = new ReentrantReadWriteLock();
+	/* 订单下载队列volatile */
+	private volatile ConcurrentHashMap<Long, DownLoadPaypal> downloadPaypal;
+
+	/* 锁 */
+	private final ReadWriteLock thdWhOrdersLock = new ReentrantReadWriteLock();
+	
+	private volatile DownLoadThdWhOrders downLoadThdWhOrders;
+
+	private final ReadWriteLock thdLogisticsProcessLock = new ReentrantReadWriteLock();
+	
+	private volatile ThdLogisticsProcess thdLogisticsProcess;
+	
+	private final ReadWriteLock downloanDistOrderLock = new ReentrantReadWriteLock();
+	
+	private volatile DownLoadDistOrder downloanDistOrder;
+	
+	// 定义线程池执行任务
+	private final ScheduledExecutorService scheduledExecutorService = Executors.newScheduledThreadPool(1,
+			new ThreadFactory() {
+				@Override
+				public Thread newThread(Runnable r) {
+					return new Thread(r, "DownLoadService");
+				}
+			});
+
+	public DownLoadService(Long compId) {
+		this.comp_id = compId;
+		this.downloadorder = new ConcurrentHashMap<Long, DownLoadOrders>();
+		this.downloadPaypal = new ConcurrentHashMap<Long, DownLoadPaypal>();
+	}
+
+	public void start() {
+		// 自动调度当前账套的订单下载服务
+		this.scheduledExecutorService.scheduleWithFixedDelay(new Runnable() {
+			@Override
+			public void run() {
+				DownLoadService.this.refresh();
+				DownLoadService.this.paypal();
+				DownLoadService.this.downloadThdWhOrders();
+				DownLoadService.this.logisticsProcess();
+				DownLoadService.this.downloanDistOrder();
+			}
+		}, 1000 * 15, 1000 * 30, TimeUnit.MILLISECONDS);
+	}
+
+	public void stop() {
+		this.scheduledExecutorService.shutdownNow();
+		this.stopdownloadorder();
+		this.stopDownloadPaypal();
+		this.stopThdWhOrders();
+		this.stopDownloanDistOrder();
+	}
+
+	private void stopdownloadorder() {
+		if (!this.downloadorder.isEmpty()) {
+			try {
+				try {
+					this.lock.writeLock().lockInterruptibly();
+					for (Long key : this.downloadorder.keySet()) {
+						DownLoadOrders o = this.downloadorder.get(key);
+						if (o != null) {
+							o.stop();
+						}
+					}
+					this.downloadorder.clear();
+				} finally {
+					this.lock.writeLock().unlock();
+				}
+			} catch (Exception e) {
+				logger.error(e);
+			}
+		}
+	}
+
+	private void refresh() {
+//		List<Long> list = EcsErpSysSiteCache.getSysSiteIds(this.comp_id);
+//		if (list == null) {
+//			return;
+//		}
+//		if (list.size() <= 0) {
+//			this.stopdownloadorder();
+//			return;
+//		}
+		try {
+			try {
+				this.lock.writeLock().lockInterruptibly();
+				List<Long> all = new ArrayList<Long>();
+				for (int i = 0; i < 1; i++) {
+					Long id = 7100072L;
+					EcsErpSysSite sysSite = EcsErpSysSiteCache.getSysSite(this.comp_id, id);
+					if (sysSite != null && sysSite.getId().equals(id)
+							&& (sysSite.getIsStop() == null || !sysSite.getIsStop())
+							&& (sysSite.getExpiresDate() != null
+									&& sysSite.getExpiresDate().after(DateUtils.getCurrentDateTime()))
+							&& !StringUtils.isEmpty(sysSite.getAppKey())) {
+						// 订单下载
+						if (sysSite.getIsSyncOrder() != null && sysSite.getIsSyncOrder()) {
+//							if (!this.downloadorder.containsKey(id)) {
+								DownLoadOrders srv = new DownLoadOrders(this.comp_id, id, sysSite.getSiteUser(),
+										sysSite.getSiteType());
+								srv.start();
+								this.downloadorder.put(id, srv);
+//							}
+						} else {
+							if (this.downloadorder.containsKey(id)) {
+								DownLoadOrders srv = this.downloadorder.get(id);
+								srv.stop();
+								this.downloadorder.remove(id);
+							}
+						}
+						all.add(id);
+					}
+				}
+				for (Long key : this.downloadorder.keySet()) {
+					if (!all.contains(key)) {
+						DownLoadOrders srv = this.downloadorder.get(key);
+						srv.stop();
+						this.downloadorder.remove(key);
+					}
+				}
+			} finally {
+				this.lock.writeLock().unlock();
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		}
+	}
+
+	private void paypal() {
+		List<Long> list = EcsErpSysBankCache.getBankIds(comp_id);
+		if (list == null) {
+			return;
+		}
+		if (list.size() <= 0) {
+			this.stopDownloadPaypal();
+			return;
+		}
+		try {
+			try {
+				this.paypalLock.writeLock().lockInterruptibly();
+				List<Long> all = new ArrayList<Long>();
+				for (int i = 0; i < list.size(); i++) {
+					Long id = list.get(i);
+					EcsErpSysBank bank = EcsErpSysBankCache.getSysBank(comp_id, id);
+					if (!bank.getIsStop() && !StringUtils.isEmpty(bank.getAppKey())) {
+						// 账单下载
+						if (bank.getIsSync()) {
+							if (!this.downloadPaypal.containsKey(id)) {
+								DownLoadPaypal srv = new DownLoadPaypal(this.comp_id, id, bank.getBankName());
+								srv.start();
+								this.downloadPaypal.put(id, srv);
+							}
+						} else {
+							if (this.downloadPaypal.containsKey(id)) {
+								DownLoadPaypal srv = this.downloadPaypal.get(id);
+								srv.stop();
+								this.downloadPaypal.remove(id);
+							}
+						}
+						all.add(id);
+					}
+				}
+				for (Long key : this.downloadPaypal.keySet()) {
+					if (!all.contains(key)) {
+						DownLoadPaypal srv = this.downloadPaypal.get(key);
+						srv.stop();
+						this.downloadPaypal.remove(key);
+					}
+				}
+			} finally {
+				this.paypalLock.writeLock().unlock();
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		}
+	}
+
+	private void stopDownloadPaypal() {
+		if (!this.downloadPaypal.isEmpty()) {
+			try {
+				this.paypalLock.writeLock().lockInterruptibly();
+				for (Long key : this.downloadPaypal.keySet()) {
+					DownLoadPaypal o = this.downloadPaypal.get(key);
+					if (o != null) {
+						o.stop();
+					}
+				}
+				this.downloadPaypal.clear();
+
+			} catch (Exception e) {
+				logger.error(e);
+			} finally {
+				this.paypalLock.writeLock().unlock();
+			}
+		}
+	}
+	
+	private void downloadThdWhOrders() {
+		boolean check = checkThdWh();
+		if (!check) {
+			this.stopThdWhOrders();
+			return;
+		}
+
+		try {
+			this.thdWhOrdersLock.writeLock().lockInterruptibly();
+			if (this.downLoadThdWhOrders == null) {
+				this.downLoadThdWhOrders = new DownLoadThdWhOrders(this.comp_id);
+				this.downLoadThdWhOrders.start();
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		} finally {
+			this.thdWhOrdersLock.writeLock().unlock();
+		}
+
+	}
+
+	private void stopThdWhOrders() {
+		try {
+			this.thdWhOrdersLock.writeLock().lockInterruptibly();
+			if (null != this.downLoadThdWhOrders) {
+				downLoadThdWhOrders.stop();
+			}
+			this.downLoadThdWhOrders = null;
+
+		} catch (Exception e) {
+			logger.error(e);
+		} finally {
+			this.thdWhOrdersLock.writeLock().unlock();
+		}
+	}
+	
+	private boolean checkThdWh() {
+		StringBuilder sqlsb1 = new StringBuilder();
+		sqlsb1.append(" SELECT 1 FROM ecs_erp_sys_wh");
+		sqlsb1.append(" WHERE comp_id = ?");
+		sqlsb1.append(" AND wh_type = 3");
+		sqlsb1.append(" AND (thd_prv = 1 OR thd_prv = 2 OR thd_prv = 3 OR thd_prv = 5 OR thd_prv = 12 OR thd_prv = 13 OR thd_prv = 14 OR thd_prv = 15 OR thd_prv = 16 OR thd_prv = 17 OR thd_prv = 18 OR thd_prv = 20 OR thd_prv = 21 OR thd_prv = 22 OR thd_prv = 23 OR thd_prv = 24 OR thd_prv = 25 OR thd_prv = 26 OR thd_prv = 27)");
+		sqlsb1.append(" AND is_stop <> 1");
+		sqlsb1.append(" LIMIT 1 ; ");
+		
+		DruidPooledConnection con = null;
+        DAOBase dao = null;
+        try {
+            dao = new DAOBase(con = PoolConnection.getCompConnection(comp_id), comp_id);
+            // 判断是否存在第三方仓库
+            Object check = dao.ExecuteScalar(sqlsb1.toString(), new Object[]{ comp_id });
+            if (null != check) {
+            	return true;
+            }
+            return false;
+        }
+        catch (Exception e) {
+            logger.error(e);
+        }
+        finally {
+            if (con != null) {
+                try {
+                    con.close();
+                }
+                catch (SQLException e) {
+                }
+            }
+        }
+        return false;
+	}
+	
+	
+	
+	private void logisticsProcess() {
+		try {
+			this.thdLogisticsProcessLock.writeLock().lockInterruptibly();
+			if (this.thdLogisticsProcess == null) {
+				this.thdLogisticsProcess = new ThdLogisticsProcess(this.comp_id);
+				this.thdLogisticsProcess.start();
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		} finally {
+			this.thdLogisticsProcessLock.writeLock().unlock();
+		}
+	}
+	
+	private void downloanDistOrder() {
+		try {
+			this.downloanDistOrderLock.writeLock().lockInterruptibly();
+			if (this.downloanDistOrder == null) {
+				this.downloanDistOrder = new DownLoadDistOrder(this.comp_id);
+				this.downloanDistOrder.start();
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		} finally {
+			this.downloanDistOrderLock.writeLock().unlock();
+		}
+	}
+	
+	private void stopDownloanDistOrder() {
+		try {
+			this.downloanDistOrderLock.writeLock().lockInterruptibly();
+			if (null != this.downloanDistOrder) {
+				downloanDistOrder.stop();
+			}
+			this.downloanDistOrder = null;
+
+		} catch (Exception e) {
+			logger.error(e);
+		} finally {
+			this.downloanDistOrderLock.writeLock().unlock();
+		}
+	}
+}

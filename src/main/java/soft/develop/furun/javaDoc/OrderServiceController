@@ -1,0 +1,259 @@
+package com.thescm.frdas.ecs.running.auto.services;
+
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import com.alibaba.druid.pool.DruidPooledConnection;
+import com.alibaba.dubbo.common.logger.Logger;
+import com.alibaba.dubbo.common.logger.LoggerFactory;
+import com.alibaba.dubbo.common.utils.StringUtils;
+import com.thescm.commons.dao.DAOBase;
+import com.thescm.commons.db.PoolConnection;
+import com.thescm.commons.utils.ComputerUtils;
+import com.thescm.commons.utils.DateUtils;
+import com.thescm.commons.utils.SysConstants;
+import com.thescm.frdas.ecs.dao.core.DAOEcsCompTask;
+import com.thescm.frdas.ecs.dao.core.DAOEcsCompTaskDetails;
+import com.thescm.frdas.ecs.domain.core.EcsCompTask;
+import com.thescm.frdas.ecs.running.auto.services.order.DownLoadService;
+
+/**
+ * 
+ * @author lidj
+ */
+public class OrderServiceController {
+
+	private static final Logger logger = LoggerFactory.getLogger(OrderServiceController.class);
+
+	private String localIpAddress = "";
+
+	private final ReadWriteLock lock = new ReentrantReadWriteLock();
+
+	/* 网店下载队列volatile */
+	private volatile ConcurrentHashMap<Long, DownLoadService> downloadMap;
+
+	// 定时线程
+	private final ScheduledExecutorService scheduledExecutorService = Executors.newScheduledThreadPool(2,
+			new ThreadFactory() {
+				@Override
+				public Thread newThread(Runnable r) {
+					return new Thread(r, "OrderServiceController");
+				}
+			});
+
+	public void start() {
+		this.downloadMap = new ConcurrentHashMap<>();
+		this.localIpAddress = ComputerUtils.getLocalHost() + "." + SysConstants.clusterNode;
+
+		/* 定时更新本地Ip到服务器 */
+		this.scheduledExecutorService.scheduleWithFixedDelay(new Runnable() {
+
+			@Override
+			public void run() {
+				this.updateIpAddress();
+			}
+
+			private void updateIpAddress() {
+				String ipAddress = ComputerUtils.getLocalHost() + "." + SysConstants.clusterNode;
+
+				DruidPooledConnection con = null;
+				DAOBase dao = null;
+				try {
+					dao = new DAOBase(con = PoolConnection.getGlobalConnection(), -1L);
+					String sqltext = "INSERT INTO ecs_core_server(server_type,server_ip,server_name,created,modified) VALUES(?,?,?,?,?) "
+							+ " ON DUPLICATE KEY UPDATE modified = VALUES(modified); ";
+					dao.ExecuteNoneQuery(sqltext, new Object[] { 1, ipAddress, ipAddress, DateUtils.getCurrentDateTime(),
+							DateUtils.getCurrentDateTime() });
+
+					OrderServiceController.this.localIpAddress = ipAddress;
+				} catch (Exception e) {
+					logger.error("updateIpAddress", e);
+				} finally {
+					if (con != null) {
+						try {
+							con.close();
+						} catch (SQLException e) {
+						}
+					}
+				}
+			}
+		}, 1000 * 15, 1000 * 60 * 15, TimeUnit.MILLISECONDS);
+
+		/* 自动调度所有账套的相关服务 */
+		this.scheduledExecutorService.scheduleWithFixedDelay(new Runnable() {
+
+			@Override
+			public void run() {
+				OrderServiceController.this.refresh();
+			}
+		}, 1000 * 15, 1000 * 60, TimeUnit.MILLISECONDS);
+
+		logger.info("OrderServiceController: " + localIpAddress);
+	}
+
+	/**
+	 * 停止所有服务
+	 */
+	public void stop() {
+		this.scheduledExecutorService.shutdownNow();
+		this.stopDownloadService();
+	}
+
+	private void stopDownloadService() {
+
+		if (this.downloadMap.isEmpty()) {
+			return;
+		}
+
+		try {
+			try {
+				this.lock.writeLock().lockInterruptibly();
+				for (Long key : this.downloadMap.keySet()) {
+					DownLoadService o = this.downloadMap.get(key);
+					if (o != null) {
+						o.stop();
+					}
+				}
+				this.downloadMap.clear();
+			} finally {
+				this.lock.writeLock().unlock();
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		}
+	}
+
+	private void refresh() {
+//		if (StringUtils.isEmpty(this.localIpAddress)) {
+//			return;
+//		}
+//		List<EcsCompTask> list = null;
+//		DruidPooledConnection con = null;
+//		DAOEcsCompTask dao = null;
+//		try {
+//			dao = new DAOEcsCompTask(con = PoolConnection.getGlobalConnection(), 0L);
+//			list = dao.getModelsServiceTags(this.localIpAddress);
+//		} catch (Exception e) {
+//			list = null;
+//			logger.error(e);
+//		} finally {
+//			if (con != null) {
+//				try {
+//					con.close();
+//				} catch (SQLException e) {
+//				}
+//			}
+//		}
+//
+//		if (list == null) {
+//			return;
+//		}
+//
+//		if (list.size() <= 0) {
+//			this.stopDownloadService();
+//			return;
+//		}
+
+		try {
+			try {
+				this.lock.writeLock().lockInterruptibly();
+
+				List<Long> allorder = new ArrayList<Long>();
+				for (int i = 0; i < 1; i++) {
+
+					EcsCompTask t = new EcsCompTask();
+//					String serviceTags = t.getServiceTags();
+					Long compId = 41L;
+
+//					if(t.getExpiresDate() == null || t.getExpiresDate().before(DateUtils.getCurrentDate())){
+//						continue;
+//					}
+
+					// 判断任务是否自动启动，以及是否有启动的tag服务
+//					if (t.getAutoRun() != null && t.getAutoRun() && serviceTags != null) {
+//
+//						// 开启订单下载服务
+//						if (serviceTags.contains("order=" + this.localIpAddress + ";")) {
+							if (!this.downloadMap.containsKey(compId)) {
+								// 清空对应的任务明细
+								this.clearStatus(compId);
+
+								DownLoadService srv = new DownLoadService(compId);
+								srv.start();
+								this.downloadMap.put(compId, srv);
+							}
+							allorder.add(compId);
+//						}
+//					}
+				}
+
+				List<Long> delorder = new ArrayList<Long>();
+				for (Long key : this.downloadMap.keySet()) {
+					if (!allorder.contains(key)) {
+						delorder.add(key);
+					}
+				}
+
+				// 删除不在列表中的项（订单下载）
+				if (!delorder.isEmpty()) {
+					for (int i = 0; i < delorder.size(); i++) {
+						Long key = delorder.get(i);
+						if (this.downloadMap.containsKey(key)) {
+							DownLoadService srv = this.downloadMap.get(key);
+							srv.stop();
+							this.downloadMap.remove(key);
+
+							// 清空对应的任务明细
+							this.clearStatus(key);
+						}
+					}
+				}
+
+			} finally {
+				this.lock.writeLock().unlock();
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		}
+	}
+
+	public boolean clearStatus(Long compId) {
+		boolean result = false;
+		DruidPooledConnection con = null;
+		DAOEcsCompTaskDetails dao = null;
+		try {
+			dao = new DAOEcsCompTaskDetails(con = PoolConnection.getGlobalConnection(), 0L);
+			dao.StartTransaction();
+			dao.delete(compId, 1);
+			dao.CommitTransaction();
+			result = true;
+		} catch (Exception e) {
+			if (con != null && dao != null) {
+				try {
+					dao.RollbackTransaction();
+				} catch (SQLException esql) {
+
+				}
+			}
+			result = false;
+			logger.error("clearStatus", e);
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (SQLException e) {
+				}
+			}
+		}
+		return result;
+	}
+
+}
