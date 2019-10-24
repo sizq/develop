@@ -54,6 +54,8 @@
 7、权限：
 	后台判断是否存在指定权限
 	boolean cstRight = dao.getRightForMenu(this.getUserId(), "emgr.main.stock.EcsErpStock", "Cst");
+	判断网店等权限(1、2、3、4、5、6、7分别代表网店、商品、仓库、供应商、头程配送方式、公司、银行账户),返回类似于o.site_id in(123456,456789)
+	String siteRight = dao.getRightBaseForResult(this.getUserId(), new String[] { "o.site_id"}, 1); 
 
 8、客户版本控制(不同版本系统参数控制)
 	InitRegisterComp.java
@@ -62,5 +64,27 @@
 	根据版本id获取版本名称
 	String verName = StringUtils.toString(dao.ExecuteScalar("SELECT ver_name FROM ecs_core_ver WHERE id = ? LIMIT 1",
                 new Object[]{verId}));
-
+9、系统Qwind条件控制：
+	1、仓库
+	show_self_only : true		//只展示自有仓数据(本地自由仓和海外自由仓)
+	show_local_self_only : true	//只展示本地自有仓
+	show_thd_only : true		//只展示第三方仓
+	show_os_and_thd : true		//只展示海外自由仓和第三方仓
+	branch_id : 123456			//展示指定公司下的仓库
+	branchIds : [123456,456789]	//展示多个指定公司下的仓库
+	
+	//@Bind #sysWhQwind.beforeExecute
+	!function (self, arg, getStockQtyAction) {
+		self.set("userData", {
+			show_self_only : true		//只展示自有仓数据(本地自由仓和海外自由仓)
+		});
+	};
+	
+10、密码MD5
+public static void main(String[] args) {
+	String loginName = "开发账号";
+	String a = "sizhiqi110";
+	String password = MD5Utils.string2MD5(MD5Utils.string2MD5(a) + MD5Utils.string2MD5(loginName));
+	System.out.println(password);
+}
 	
