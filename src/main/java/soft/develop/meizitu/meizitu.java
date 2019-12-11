@@ -15,7 +15,7 @@ public class meizitu {
 	
 	public static void main(String[] args) {
 //		获取大分类下全部 如：http://www.mzitu.com/xinggan/
-		getClassification("https://www.mzitu.com/hot");
+		getClassification("https://www.mzitu.com/");
 		
 		//获取指定页数 如：//http://www.mzitu.com/mm/page/2/
 //		getEachpage("http://www.mzitu.com/mm/page/2/");
@@ -37,10 +37,14 @@ public class meizitu {
 		Elements PageCountHtml = doc.select("[class=page-numbers]");
 		//当前大分类总页数
 		int PageCount = Integer.parseInt(PageCountHtml.get(PageCountHtml.size()-1).text());
-		
-		for (int i = 1; i <= PageCount; i++) {
-			getEachpage(url+"/page/"+i+"/");
-		}
+		int half = PageCount/2;
+		DownloadThread thread1 = new DownloadThread(0,half,url);
+		DownloadThread thread2 = new DownloadThread(half,PageCount,url);
+		thread1.start();
+		thread2.start();
+//		for (int i = 1; i <= PageCount; i++) {
+//			getEachpage(url+"/page/"+i+"/");
+//		}
 	}
 	/**
 	 * 
