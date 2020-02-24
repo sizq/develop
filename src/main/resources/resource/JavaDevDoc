@@ -87,4 +87,21 @@ public static void main(String[] args) {
 	String password = MD5Utils.string2MD5(MD5Utils.string2MD5(a) + MD5Utils.string2MD5(loginName));
 	System.out.println(password);
 }
+11、接口  万邑通/frdas-ecs-provider/src/main/java/com/thescm/frdas/ecs/api/WarehouseInfo.java
+clientId = m.get("user");
+accessToken = m.get("token");
+if (SysConstants.getIsReleased()){
+	clientSecret = SysParams.getProperty("DEFAULT.WINIT.APPSECRET");
+	sysParams.put("client_id", SysParams.getProperty("DEFAULT.WINIT.APPKEY"));
+}else{
+	clientSecret = SysParams.getProperty("DEFAULT.WINIT.SANDBOX.APPSECRET");
+	sysParams.put("client_id", SysParams.getProperty("DEFAULT.WINIT.SANDBOX.APPKEY"));
+}
+
+if (!SysConstants.getIsReleased()) {
+	// 指定沙箱环境
+	sysParams.put(DefaultClient.SAND_BOX_USED, true);
+}
+
+
 	

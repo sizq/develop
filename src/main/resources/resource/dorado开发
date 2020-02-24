@@ -2,3 +2,27 @@
 <Property name="metaData">
   <Property name="securityTag">emgr.main.system.EcsErpSysPrdtPicBatchImpt</Property>
 </Property>
+
+
+
+JS中动态添加Colum
+1、使用DataColumn
+    var isPurColumn = new dorado.widget.grid.DataColumn({
+    	caption : "是否采购",
+    	name : "is_pur",
+    	property : "is_pur",
+    	dataType : "boolean",
+    	align : "center",
+    	width:110
+    });
+    dgPurPlanDetail.addColumn(isPurColumn);
+
+2、使用Column
+    dgPurPlanDetail.addColumn({
+    	caption : "是否采购",
+    	name : "is_pur",
+    	property : "is_pur",
+    	dataType : "boolean",
+    	align : "center",
+    	width:110
+    });

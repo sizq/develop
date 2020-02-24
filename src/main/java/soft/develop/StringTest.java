@@ -1,5 +1,7 @@
 package soft.develop;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,12 +38,12 @@ public class StringTest {
 //		boolean concat = a.contains(b);
 //		System.out.println(i+" : "+concat);
 		
-		Integer a =1;
-		int b = 1;
-		if (a==1) {
-			System.out.println("相等");
-		}
-		
+//		Integer a =1;
+//		int b = 1;
+//		if (a==1) {
+//			System.out.println("相等");
+//		}
+		listToArray();
 		
 
 	}
@@ -134,5 +136,43 @@ public class StringTest {
 		} else {
 			return true;
 		}
+	}
+	
+	/**
+	 * 将List转为数组
+	 * 10,20,30,40,50
+	 * Hello Word
+	 * true
+	 * false
+	 */
+	public static void listToArray() {
+		List<Long> longList = new ArrayList<>();
+		longList.add(10l);
+		longList.add(20l);
+		longList.add(30l);
+		longList.add(40l);
+		longList.add(50l);
+		/* 拼接sql时使用,
+		 * eg: where id in("+StringUtils.toArrayLong(longList)+")
+		 * 等于:where id in(10,20,30,40,50)
+		 */
+		String arrayLong = StringUtils.toArrayLong(longList);
+		System.out.println(arrayLong);
+		
+		//java中字符串拼接
+		String str1 = "Hello";
+		String str2 = "Word";
+		String join = StringUtils.join(str1," ",str2);
+		System.out.println(join);
+		
+		//正则判断字符串中是否包含全角标点符号
+		String str3 = ",123dert5%";
+		String str4 = "，。！？fewr343";
+		boolean boolean1 = StringUtils.testRegex("^[\\x00-\\xff]+$", str3);
+		boolean boolean2 = StringUtils.testRegex("^[\\x00-\\xff]+$", str4);
+		System.out.println(boolean1);
+		System.out.println(boolean2);
+		
+
 	}
 }
