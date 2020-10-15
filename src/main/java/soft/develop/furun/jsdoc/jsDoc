@@ -1,0 +1,215 @@
+1、使用js创建dialog界面的两种方式：
+一、 先创建好界面，然后一个一个去set界面属性
+function turnPurOrder(self,arg,data,updateAction){
+	var dialog = arg.toolbar.createChildForm("转采购", "400", "200");
+	var children = dialog.get("children");
+	if (!children || children.length <= 0) {
+		
+		children  = [{
+			$type : "HtmlContainer",
+			style : "color:#000;padding-left:28px;padding-top:20px",
+			content : "是否确定转采购?"
+		}];
+		//仅一单一采购时展示
+		if(byOrderType == "by_order"){
+			children.push({
+				$type : "FormElement",
+				editorType: "RadioGroup",
+				property: "turnPurOrder",
+				labelAlign: 'right',
+				label: "生成方式：",
+				readOnly:false,
+				editor : {
+					$type:"RadioGroup",
+					radioButtons: [{
+	                    text: "按供应商+采购仓汇总采购",
+	                    value: "cust_wh"
+	                },{
+	                text: "按订单唯一标识+供应商+采购仓汇总采购",
+	                value: "orderid_cust_wh"
+	            }],
+	                value: turnType
+				}
+			});
+		}
+		
+		if (purRight) {
+			children.push({
+				$type : "FormElement",
+				property : "is_submit",
+				id : "is_submit",
+				style : "padding-left:25px",
+				width : 170,
+				showHint:false,
+				showLabel:false,
+				editor : {
+					$type:"CheckBox",
+					caption:"是否提审"
+				}
+			});
+		}
+		
+		dialog.set("children",children);
+		
+		dialog.set("caption","转采购");
+		dialog.set("buttons",[{
+			caption : "确定",
+			iconClass:'stufont icon-yes',
+			onClick : function(self){
+				var res = new dorado.Entity();
+				var children = dialog.get("children");
+				 if (children && children.length > 0) {
+				        children.each(function(obj) {
+				            if (obj instanceof dorado.widget.AutoForm) {
+				                var entity = obj.get("entity");
+				                dorado.Object.eachProperty(entity,function(p,v){
+				                    res.set(p, v);
+				                });
+				            }
+				            if (obj instanceof dorado.widget.FormElement) {
+				                var field = "" + obj.get("property");
+				                var value = obj.get("value");
+				                if (field && value) {
+				                    res.set(field, value);
+				                }
+				            }
+				        });
+				    }
+				var isSubmit = res.get("is_submit");
+				turnType = res.get("turnPurOrder");
+				var data = getSelection(view.id("dgPurByOrder"));
+				updateAction.set("parameter", {
+					data : dorado.JSON.stringify(data),
+					is_submit : isSubmit,
+					turn_pur_type : turnType,
+					actionName : "turnPurOrder"
+				});
+				updateAction.execute(function() {
+					dialog.close();
+					view.id("dsPurByOrder").flushAsync();
+				});
+			}
+		},{
+			caption : "取消",
+			iconClass:'stufont icon-close',
+			onClick : function(){
+				dialog.close();
+			}
+		}]);
+		dialog.set("onClose",function(self){
+			self.get("children").each(function(obj){
+				if (obj instanceof dorado.widget.FormElement) {
+	                var field = "" + obj.get("property");
+	                if(field == "turnPurOrder"){
+	                	obj.get("editor").set("value", turnType);
+	                }
+	                
+	            }
+			});
+		});
+	}
+	dialog.show();
+}
+
+二、直接创建界面并同时设置好属性
+function delByBatch(feeType){
+	var params = beforeLoadData();
+	var start_date = params.start_date;
+	var end_date = params.end_date;
+	var end_date = params.end_date;
+	var date_type = params.date_type;
+	var getCreated = view.id("getCreated");
+	getCreated.set("parameter",{
+		fee_type : feeType,
+		start_date : start_date,
+		end_date : end_date,
+		date_type : date_type
+	})
+	getCreated.execute();
+	var u = getCreated.get("returnValue").userList;
+	var r = getCreated.get("returnValue").createdList;
+	var mapping = [];
+	r.each(function(e){
+		mapping.push({key:e, value:e});	
+	});
+	var userMapping = [];
+	u.each(function(e){
+		userMapping.push({key:e.user_id, value:e.user_name});	
+	});
+	
+	var dialog = new dorado.widget.Dialog({
+		width : 310,
+		height : 180,
+		caption : "删除导入数据",
+		children : [{
+			$type : "AutoForm",
+			cols:"*",
+			elements : [{
+				name : "created",
+				property : "created",
+				label : "创建时间",
+				onRefreshDom : function(self) {
+					$fly(self._labelEl).toggleClass("form-label-required", true);
+				},
+				editor : {
+					$type : "TextEditor",
+					editable : false,
+					mapping : mapping,
+					trigger : view.getComponentReference("autoMappingDropDown1")
+				}
+			},{
+				name : "user_id",
+				property : "user_id",
+				label : "创建人",
+				editor : {
+					$type : "TextEditor",
+					editable : false,
+					mapping : userMapping,
+					trigger : view.getComponentReference("autoMappingDropDown1")
+				}
+			}]
+		}],
+		buttons : [{
+			caption : "确定",
+            iconClass : "stufont icon-yes",
+			onClick : function(){
+				var entity = dialog.get("children")[0].get("entity");
+				var created = entity.created;
+				if(!created){
+					dorado.MessageBox.alert("请选择创建时间");
+					return;
+				}
+				
+				var delAction = view.id("delAction");
+				delAction.set("parameter",{
+					fee_type : feeType,
+					created : created, 
+					user_id : entity.user_id,
+					tags : "byBatch"
+				})
+				
+				delAction.execute(function(){
+					if(0 == feeType ){
+						view.id("dsTrade").flushAsync();
+					}else{
+						view.id("dsRefund").flushAsync();
+					}
+					dialog.close();
+				})
+			}
+		},{
+			caption : "取消",
+            iconClass : "stufont icon-close",
+			onClick : function(){
+				dialog.close();
+			}
+		}],
+		onClose : function(self){
+			self.get("children").each(function(c){
+				c.destroy();
+			});
+			self.destroy();
+		}
+	});
+	dialog.show();
+}

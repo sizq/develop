@@ -6,12 +6,12 @@ import java.util.List;
 public class ListTest {
 	public static void main(String[] args) {
 		List<String> list  = new ArrayList<String>();
-		list.add("123");
-		list.add("dsfs");
-		list.add("werwe");
-		list.add("ggg");
-		list.add("zxc");
-		list.add("iii");
+		list.add("1");
+		list.add("10");
+		list.add("5");
+		list.add("55");
+		list.add("2");
+		list.add("23");
 		System.out.println(list);
 		list.remove("123");
 		System.out.println(list);

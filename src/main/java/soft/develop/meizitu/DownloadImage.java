@@ -23,7 +23,8 @@ public class DownloadImage {
         //设置请求超时为5s  
         con.setConnectTimeout(5*1000);  
         String referer = url.getProtocol()+"://"+url.getHost();
-        con.setRequestProperty("Referer", referer);
+        con.setRequestProperty("Referer", "https://www.mzitu.com/");
+        con.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4209.2 Safari/537.36");
         // 输入流  
         InputStream is = con.getInputStream();  
       

@@ -43,9 +43,41 @@ public class StringTest {
 //		if (a==1) {
 //			System.out.println("相等");
 //		}
-		listToArray();
+//		listToArray();
+		
+		
+		
+		
+		//a1cvdfs55gdfgdg99  87fs
+		
+		
+		String a = "";
+		boolean flag = false;
+		String str = "a1cvdfs55gdfgdg99  87fs";
+		char[] charArray = str.toCharArray();
+		for(int i = charArray.length-1; i>=0; i--){
+			String c = String.valueOf(charArray[i]);
+			if (isNumeric(c)) {
+				a = c+""+a;
+				flag = true;
+			}else{
+				if (flag) {
+					break;
+				}
+			}
+		}
+		System.out.println(a);
 		
 
+	}
+	
+	public static boolean isNumeric(String str) {
+		Pattern pattern = Pattern.compile("[0-9]*");
+		Matcher isNum = pattern.matcher(str);
+		if (!isNum.matches()) {
+			return false;
+		}
+		return true;
 	}
 
 	/**

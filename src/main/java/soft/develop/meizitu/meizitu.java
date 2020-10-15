@@ -9,16 +9,16 @@ import org.jsoup.select.Elements;
 public class meizitu {
 	private static meizitu meizitu = new meizitu();
 	
-	public static String path = "F:/meizitu/"; //存放文件地址
+	public static String path = "H:/meizitu/"; //存放文件地址
 	public static long restTime = 3000; //休眠时间 （豪秒）不能太快
 	
 	
 	public static void main(String[] args) {
 //		获取大分类下全部 如：http://www.mzitu.com/xinggan/
-		getClassification("https://www.mzitu.com/");
-		
-		//获取指定页数 如：//http://www.mzitu.com/mm/page/2/
-//		getEachpage("http://www.mzitu.com/mm/page/2/");
+//		getClassification("https://www.mzitu.com/");
+		//https://www.mzitu.com/tag/jiemeihua/
+		//获取指定页数 如：http://www.mzitu.com/mm/page/2/
+		getEachpage("https://www.mzitu.com/");
 		
 //		获取每组图片 如：http://www.mzitu.com/148600
 //		getEachGroup("http://www.mzitu.com/147217");
@@ -37,14 +37,9 @@ public class meizitu {
 		Elements PageCountHtml = doc.select("[class=page-numbers]");
 		//当前大分类总页数
 		int PageCount = Integer.parseInt(PageCountHtml.get(PageCountHtml.size()-1).text());
-		int half = PageCount/2;
-		DownloadThread thread1 = new DownloadThread(0,half,url);
-		DownloadThread thread2 = new DownloadThread(half,PageCount,url);
-		thread1.start();
-		thread2.start();
-//		for (int i = 1; i <= PageCount; i++) {
-//			getEachpage(url+"/page/"+i+"/");
-//		}
+		for (int i = 1; i <= PageCount; i++) {
+			getEachpage(url+"/page/"+i+"/");
+		}
 	}
 	/**
 	 * 
