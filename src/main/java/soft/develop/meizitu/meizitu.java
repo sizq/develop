@@ -18,7 +18,7 @@ public class meizitu {
 //		getClassification("https://www.mzitu.com/");
 		//https://www.mzitu.com/tag/jiemeihua/
 		//获取指定页数 如：http://www.mzitu.com/mm/page/2/
-		getEachpage("https://www.mzitu.com/");
+		getEachpage("https://www.mzitu.com/208459");
 		
 //		获取每组图片 如：http://www.mzitu.com/148600
 //		getEachGroup("http://www.mzitu.com/147217");
@@ -104,10 +104,24 @@ public class meizitu {
 			// 5000是设置连接超时时间，单位ms
 			Connection connection = Jsoup.connect(url).timeout(5000);
 			//直接get服务器有可能会拒绝请求，在这里模拟用户正常访问
+			connection.header("upgrade-insecure-requests","1");
+			connection.header("User-Agent","Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.131 Safari/537.36");
 			connection.header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3");
 			connection.header("Accept-Encoding","gzip, deflate, br");
-			connection.header("Accept-Language","zh-CN,zh;q=0.9");
-			connection.header("User-Agent","Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.131 Safari/537.36");
+			connection.header("Accept-Language","zh-CN,zh;q=0.9");//max-age=0
+			connection.header(":authority","www.mzitu.com");
+			connection.header(":method","GET");
+			connection.header(":path","/208459");
+			connection.header(":scheme","https");
+			
+			connection.header("cookie","Hm_lvt_cb7f29be3c304cd3bb0c65a4faa96c30=1602573105,1602820232,1603695944,1604555512; Hm_lpvt_cb7f29be3c304cd3bb0c65a4faa96c30=1604555697");
+			connection.header("cache-control","max-age=0");
+			connection.header("if-modified-since","Wed, 04 Nov 2020 16:44:38 GMT");
+			connection.header("sec-fetch-dest","document");
+			connection.header("sec-fetch-mode","navigate");
+			connection.header("sec-fetch-site","none");
+			connection.header("sec-fetch-user","?1");
+			connection.header("upgrade-insecure-requests","1");
 			return connection.get();
 		} catch (IOException e) {
 			e.printStackTrace();

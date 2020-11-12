@@ -103,5 +103,12 @@ if (!SysConstants.getIsReleased()) {
 	sysParams.put(DefaultClient.SAND_BOX_USED, true);
 }
 
+12、日期格式转换
+2020-10-20T20:52:09+0800  TO DATE
+Date paymentDate = DateUtils.parseDate(StringUtils.toString(map.get("payment_date")), "yyyy-MM-dd'T'HH:mm:ssZ");
 
+
+
+13、返回json格式的map
+String msg = MessageBuilder.create().add("comp_id",41).toJSONString();
 	
