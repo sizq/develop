@@ -1,0 +1,148 @@
+package com.thescm.frdas.ecs.mq.trade.commons.method;
+
+import java.util.Map;
+
+import com.googlecode.aviator.runtime.function.AbstractFunction;
+import com.googlecode.aviator.runtime.function.FunctionUtils;
+import com.googlecode.aviator.runtime.type.AviatorBoolean;
+import com.googlecode.aviator.runtime.type.AviatorObject;
+import com.thescm.commons.utils.StringUtils;
+
+public class EcsAviator extends AbstractFunction {
+
+    @Override
+    public String getName() {
+        return "EcsAviator.contains";
+    }
+
+    /**
+     * 1包含 2等于 3开头 4结尾
+     * 5条件包含数据源，条件集合比数据源集合大
+     * 6数据源包含条件，数据源集合比条件集合大
+     * 7不包含
+     * 9不等于
+     * 10 空白
+     * 11 非空
+     */
+    @Override
+    public AviatorObject call(Map<String, Object> env, AviatorObject arg1, AviatorObject arg2, AviatorObject arg3) {
+        //设定的值
+        String values = StringUtils.toString(FunctionUtils.getStringValue(arg1, env));
+        if (values.startsWith(",")) {
+            values = values.substring(1);
+        }
+        if (values.endsWith(",")) {
+            values = values.substring(0, values.length() - 1);
+        }
+
+        //订单字段值
+        String fieldValue = StringUtils.toString(FunctionUtils.getJavaObject(arg2, env));
+        if (fieldValue.startsWith(",") || fieldValue.startsWith("$")) {
+            fieldValue = fieldValue.substring(1);
+        }
+        if (fieldValue.endsWith(",") || fieldValue.endsWith("$")) {
+            fieldValue = fieldValue.substring(0, fieldValue.length() - 1);
+        }
+
+        String[] fields = null;
+        if (fieldValue.contains("$")) {
+            fields = fieldValue.split("$");
+        } else {
+            fields = fieldValue.split(",");
+        }
+
+        Number type = FunctionUtils.getNumberValue(arg3, env);
+        int calType = type.intValue();
+
+        if (calType == 1) {
+            for (String field : fields) {
+            	for(String v : values.split(",")){
+            		if(field.contains(v)){
+            			return AviatorBoolean.TRUE;
+            		}
+            	}
+            }
+        } else if (calType == 2) {
+            for (String field : fields) {
+                if (StringUtils.join(",", values, ",").contains(StringUtils.join(",", field, ","))) {
+                    return AviatorBoolean.TRUE;
+                }
+            }
+        } else if (calType == 3) {
+        	for (String field : fields) {
+            	for(String v : values.split(",")){
+            		if(field.startsWith(v)){
+            			return AviatorBoolean.TRUE;
+            		}
+            	}
+            }
+        } else if(calType == 4){
+        	for (String field : fields) {
+            	for(String v : values.split(",")){
+            		if(field.endsWith(v)){
+            			return AviatorBoolean.TRUE;
+            		}
+            	}
+            }
+        } else if(calType == 5){
+            for (String field : fields) {
+                if (!StringUtils.join(",", values, ",").contains(StringUtils.join(",", field, ","))) {
+                    return AviatorBoolean.FALSE;
+                }
+            }
+            return AviatorBoolean.TRUE;
+        } else if (calType == 6) {
+            for (String v : values.split(",")) {
+                if (!fieldValue.contains(v)) {
+                    return AviatorBoolean.FALSE;
+                }
+            }
+            return AviatorBoolean.TRUE;
+        }else if(calType == 7){
+        	AviatorBoolean isCheck = AviatorBoolean.TRUE;
+        	for (String field : fields) {
+            	for(String v : values.split(",")){
+            		if(field.contains(v)){
+            			return AviatorBoolean.FALSE;
+            		}
+            	}
+            }
+        	 return isCheck;
+        }else if(calType == 8){
+        	for (String field : fields) {
+        		for (String v : values.split(",")) {
+        			if (StringUtils.equals(v, field)) {
+        				return AviatorBoolean.TRUE;
+        			}
+        		}
+        	}
+        }else if(calType == 9){
+        	AviatorBoolean isCheck = AviatorBoolean.TRUE;
+        	for (String field : fields) {
+        		for (String v : values.split(",")) {
+        			if (StringUtils.equals(v, field)) {
+        				return AviatorBoolean.FALSE;
+        			}
+        		}
+        	}
+        	return isCheck;
+        }else if(calType == 10){
+        	AviatorBoolean isCheck = AviatorBoolean.TRUE;
+        	for (String field : fields) {
+    			if (!StringUtils.isEmpty(field)) {
+    				return AviatorBoolean.FALSE;
+    			}
+        	}
+        	return isCheck;
+        }else if(calType == 11){
+        	AviatorBoolean isCheck = AviatorBoolean.TRUE;
+        	for (String field : fields) {
+    			if (StringUtils.isEmpty(field)) {
+    				return AviatorBoolean.FALSE;
+    			}
+        	}
+        	return isCheck;
+        }
+        return AviatorBoolean.FALSE;
+    }
+}

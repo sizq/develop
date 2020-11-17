@@ -1,0 +1,302 @@
+package com.thescm.frdas.ecs.domain.system;
+
+import com.alibaba.fastjson.annotation.JSONField;
+
+import java.util.Date;
+
+public class EcsErpSysPolicies {
+
+    @JSONField(name = "id")
+    private Long id;
+
+    /**
+     * 公司ID
+     */
+    @JSONField(name = "comp_id")
+    private Long compId;
+    /**
+     * 策略类型0:分仓策略,1:物流策略,2:审核策
+     */
+    @JSONField(name = "ply_type")
+    private int plyType;
+    /**
+     * 优先级
+     */
+    @JSONField(name = "ply_level")
+    private Integer plyLevel;
+    /**
+     * 策略名称
+     */
+    @JSONField(name = "ply_name")
+    private String plyName;
+    /**
+     * 条件因子（key）,多个以‘,’隔开
+     */
+    @JSONField(name = "condit_key")
+    private String conditKey;
+    /**
+     * 条件表达式
+     */
+    @JSONField(name = "condit_expr")
+    private String conditExpr;
+    /**
+     * 条件对象
+     */
+    @JSONField(name = "condit_obj")
+    private String conditObj;
+    /**
+     * 仓库ID,多个以\',\'隔开
+     */
+    @JSONField(name = "wh_id")
+    private String whId;
+    /**
+     * 仓库名称,多个以\',\'隔开
+     */
+    @JSONField(name = "wh_name")
+    private String whName;
+    /**
+     * 物流公司
+     */
+    @JSONField(name = "logistics_id")
+    private Long logisticsId;
+    /**
+     * 物流公司所属仓库
+     */
+    @JSONField(name = "logistics_wh_id")
+    private String logisticsWhId; 
+    /**
+     * 物流公司所属仓库名称
+     */
+    @JSONField(name = "logistics_wh_name")
+    private String logisticsWhName;
+    /**
+     * 是否停用
+     */
+    @JSONField(name = "is_stop")
+    private Boolean isStop;
+
+    @JSONField(name = "created")
+    private Date created;
+
+    @JSONField(name = "modified")
+    private Date modified;
+
+    /**
+     * 创建人
+     */
+    @JSONField(name = "user_id")
+    private Long userId;
+	/**
+	 * 是否开启便签(目前只用于审核策略)
+	 */
+	@JSONField(name = "is_sticker")
+	private Boolean isSticker;
+	/**
+	 * 便签内容(目前只用于审核策略)
+	 */
+	@JSONField(name = "sticker")
+	private String sticker;
+	/**
+	 *开始时间
+	 */
+	@JSONField(name = "start_date")
+	private Date startDate;
+	/**
+	 * 结束时间
+	 */
+	@JSONField(name = "end_date")
+	private Date endDate;
+    
+	@JSONField(name = "logistics_code")
+	private String logisticsCode;
+    
+	@JSONField(name = "signature_type")
+	private String signatureType;
+	
+	public Long getId() {
+		return id;
+	}
+
+	public void setId(Long id) {
+		this.id = id;
+	}
+
+	public Long getCompId() {
+		return compId;
+	}
+
+	public void setCompId(Long compId) {
+		this.compId = compId;
+	}
+
+	public int getPlyType() {
+		return plyType;
+	}
+
+	public void setPlyType(int plyType) {
+		this.plyType = plyType;
+	}
+
+	public Integer getPlyLevel() {
+		return plyLevel;
+	}
+
+	public void setPlyLevel(Integer plyLevel) {
+		this.plyLevel = plyLevel;
+	}
+
+	public String getPlyName() {
+		return plyName;
+	}
+
+	public void setPlyName(String plyName) {
+		this.plyName = plyName;
+	}
+
+	public String getConditKey() {
+		return conditKey;
+	}
+
+	public void setConditKey(String conditKey) {
+		this.conditKey = conditKey;
+	}
+
+	public String getConditExpr() {
+		return conditExpr;
+	}
+
+	public void setConditExpr(String conditExpr) {
+		this.conditExpr = conditExpr;
+	}
+
+	public String getConditObj() {
+		return conditObj;
+	}
+
+	public void setConditObj(String conditObj) {
+		this.conditObj = conditObj;
+	}
+
+
+	public String getWhId() {
+		return whId;
+	}
+
+	public void setWhId(String whId) {
+		this.whId = whId;
+	}
+
+	public String getWhName() {
+		return whName;
+	}
+
+	public void setWhName(String whName) {
+		this.whName = whName;
+	}
+
+	public Long getLogisticsId() {
+		return logisticsId;
+	}
+
+	public void setLogisticsId(Long logisticsId) {
+		this.logisticsId = logisticsId;
+	}
+
+	public String getLogisticsWhId() {
+		return logisticsWhId;
+	}
+
+	public void setLogisticsWhId(String logisticsWhId) {
+		this.logisticsWhId = logisticsWhId;
+	}
+
+	public String getLogisticsWhName() {
+		return logisticsWhName;
+	}
+
+	public void setLogisticsWhName(String logisticsWhName) {
+		this.logisticsWhName = logisticsWhName;
+	}
+
+	public Boolean getIsStop() {
+		return isStop;
+	}
+
+	public void setIsStop(Boolean isStop) {
+		this.isStop = isStop;
+	}
+
+	public Date getCreated() {
+		return created;
+	}
+
+	public void setCreated(Date created) {
+		this.created = created;
+	}
+
+	public Date getModified() {
+		return modified;
+	}
+
+	public void setModified(Date modified) {
+		this.modified = modified;
+	}
+
+	public Long getUserId() {
+		return userId;
+	}
+
+	public void setUserId(Long userId) {
+		this.userId = userId;
+	}
+
+	public Boolean getIsSticker() {
+		return isSticker;
+	}
+
+	public void setIsSticker(Boolean sticker) {
+		isSticker = sticker;
+	}
+
+	public String getSticker() {
+		return sticker;
+	}
+
+	public void setSticker(String sticker) {
+		this.sticker = sticker;
+	}
+
+	public Date getStartDate() {
+		return startDate;
+	}
+
+	public void setStartDate(Date startDate) {
+		this.startDate = startDate;
+	}
+
+	public Date getEndDate() {
+		return endDate;
+	}
+
+	public void setEndDate(Date endDate) {
+		this.endDate = endDate;
+	}
+
+	public String getLogisticsCode() {
+		return logisticsCode;
+	}
+
+	public void setLogisticsCode(String logisticsCode) {
+		this.logisticsCode = logisticsCode;
+	}
+
+	public String getSignatureType() {
+		return signatureType;
+	}
+
+	public void setSignatureType(String signatureType) {
+		this.signatureType = signatureType;
+	}
+	
+	
+}

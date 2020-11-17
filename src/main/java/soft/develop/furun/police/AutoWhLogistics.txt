@@ -1,0 +1,3278 @@
+package com.thescm.frdas.ecs.mq.trade.commons;
+
+import java.math.BigDecimal;
+import java.sql.SQLException;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.springframework.util.CollectionUtils;
+
+import com.alibaba.druid.pool.DruidPooledConnection;
+import org.slf4j.Logger;
+import com.alibaba.fastjson.JSON;
+import com.googlecode.aviator.AviatorEvaluator;
+import com.googlecode.aviator.Expression;
+import com.thescm.commons.dao.DAOBase;
+import com.thescm.commons.db.BatchModel;
+import com.thescm.commons.db.PoolConnection;
+import com.thescm.commons.db.SQLHelper;
+import com.thescm.commons.utils.DateUtils;
+import com.thescm.commons.utils.JSONUtils;
+import com.thescm.commons.utils.StringUtils;
+import com.thescm.frdas.ecs.api.SecurityUtils;
+import com.thescm.frdas.ecs.cache.*;
+import com.thescm.frdas.ecs.dao.DAOEcsBase;
+import com.thescm.frdas.ecs.dao.stock.DAOEcsErpStock;
+import com.thescm.frdas.ecs.dao.system.DAOEcsErpSysLogistics;
+import com.thescm.frdas.ecs.dao.system.DAOEcsErpSysLogisticsWh;
+import com.thescm.frdas.ecs.dao.system.DAOEcsErpSysPolicies;
+import com.thescm.frdas.ecs.dao.trade.DAOEcsErpOrders;
+import com.thescm.frdas.ecs.dao.trade.DAOEcsErpOrdersDetails;
+import com.thescm.frdas.ecs.dao.trade.DAOEcsErpPoliciesGift;
+import com.thescm.frdas.ecs.domain.core.EcsCompSubusers;
+import com.thescm.frdas.ecs.domain.system.*;
+import com.thescm.frdas.ecs.domain.trade.EcsErpOrders;
+import com.thescm.frdas.ecs.domain.trade.EcsErpOrdersDetails;
+import com.thescm.frdas.ecs.domain.trade.EcsErpPoliciesGift;
+import com.thescm.frdas.ecs.domain.trade.EcsErpPoliciesGiftDetails;
+import com.thescm.frdas.ecs.impl.trade.EcsErpOrders.check.WhCode;
+import com.thescm.frdas.ecs.impl.utils.OrderRemLogger;
+import com.thescm.frdas.ecs.impl.utils.OrderTypeUtils;
+import com.thescm.frdas.ecs.mq.slowly.utils.IntellectLogistics;
+import com.thescm.frdas.ecs.mq.trade.commons.method.EcsAviator;
+import com.thescm.frdas.ecs.utils.CurrencyUtils;
+import com.thescm.frdas.ecs.utils.SysParams;
+import com.thescm.frdas.ecs.utils.enums.LogisticsTypeEnum;
+import com.thescm.frdas.ecs.utils.enums.OrderTypeEnum;
+import com.thescm.frdas.ecs.utils.enums.SiteSelfSendEnum;
+
+/**
+ * 默认不加载订单values值
+ */
+public class AutoWhLogistics {
+	private Logger logger = null;
+	private Long compId;
+	private Long id;
+	private Map<String, Object> values;
+	private List<Map<String, Object>> orderDetails;
+	//以下的是测试工具专用，正常逻辑不使用
+	private boolean isTest;
+	private List<Map<String, Object>> testResult = new ArrayList<>();
+	private Set<String> policiesIds = null;
+	private String errorMsg = "";
+
+	public void setPoliciesIds(Set<String> policiesIds) {
+		this.policiesIds = policiesIds;
+	}
+
+	public String getErrorMsg() {
+
+		return errorMsg;
+	}
+
+	static {
+        AviatorEvaluator.addFunction(new EcsAviator());
+    }
+
+	public AutoWhLogistics(Long compId, long id, boolean isTest, Logger logger) {
+		this.compId = compId;
+		this.id = id;
+		this.isTest = isTest;
+		this.logger = logger;
+	}
+
+	/**
+	 * 1.策略分仓
+	 * isManual 是否手动点击分仓分物流
+	 */
+	public boolean matchWh(boolean chgWh,boolean isManual){
+		return matchWh(chgWh, true,isManual);
+	}
+
+	/**
+	 * 1.策略分仓
+	 */
+	public boolean matchWh(boolean chgWh, boolean reload,boolean isManual) {
+		if(reload) {
+			this.values = this.getValues(0, false);
+		}
+
+		if (null == values || values.isEmpty()) {
+			return false;
+		}
+		// 第一条记录
+		String mergeOrder = (String) this.values.get("merge_order");
+		Integer mergeStatus = (Integer) this.values.get("merge_status");
+		Integer orderStatus = (Integer) this.values.get("order_status");
+        Integer orderType = (Integer) this.values.get("order_type");
+        String shippingType = (String) this.values.get("shipping_type");
+        Long siteId = (Long) this.values.get("site_id");
+        Long orderId = (Long) this.values.get("id");
+		Long whId = (Long) this.values.get("wh_id");
+		// 合并订单子订单不处理
+		if (mergeStatus != null && mergeStatus >= 2) {
+			errorMsg = "合并订单子订单不处理";
+			return false;
+		}
+
+		if(!isTest && !isManual) {
+			// 非待审核不处理
+            if (!(orderType == OrderTypeEnum.SHOPIFY.value()&& StringUtils.equals(shippingType, "amazon_marketplace_web"))
+                    &&(orderStatus == null || orderStatus != 0)) {
+                errorMsg = "非待审核不处理";
+                return false;
+            }
+		}
+
+		// 如果已经分配了仓库，则不再进行分仓处理
+		if (!chgWh && null != whId) {
+			errorMsg = "如果已经分配了仓库，则不再进行分仓处理";
+			return true;
+		}
+		boolean checkLock = orderStatus == 0;
+		EcsErpSysWh sysWh = EcsErpSysWhCache.getSysWh(compId, whId);
+
+        //美特多全球购平台，配送方式 = fulfillment 不走分仓策略
+        if(OrderTypeEnum.MercadolibreGBL.value() == orderType && "fulfillment".equals(shippingType)){
+            Boolean fal = autoSetMcbWH(siteId, orderId);
+            if(!fal){
+                errorMsg = "MercadolibreGBL未找到Mercadolibre仓，请先添加。";
+                return false;
+            }
+            return true;
+        }
+
+		List<Long> mergeOrderList = StringUtils.toArrayLong(mergeOrder);
+		EcsErpSysPoliciesModel models = EcsErpSysPoliciesCache.getSysPolicies(compId, 0);
+		if (models == null || models.getList().size()<=0) {
+			errorMsg = "策略为空，请先添加策略。";
+			return false;
+		}
+		for (EcsErpSysPolicies policy : models.getList()) {
+			if (isTest && policiesIds != null && !policiesIds.contains(policy.getId().toString())) {
+				continue;
+			}
+			String exp = policy.getConditExpr();
+			boolean isAccord = true;
+			try {
+				if (!this.exec(exp, this.values, policy.getConditObj(), compId)) {
+					isAccord = false;
+					if (isTest) {
+						this.failure(policy, this.values);
+					}
+				}
+			} catch (Exception e) {
+				if (isTest) {
+					Map<String, Object> errorExp = new HashMap<>();
+					errorExp.put("id", policy.getId());
+					errorExp.put("ply_name", policy.getPlyName());
+					errorExp.put("wh_name", policy.getWhName());
+					errorExp.put("level", policy.getPlyLevel());
+					errorExp.put("logistics_wh_name", policy.getLogisticsWhName());
+					errorExp.put("logistics_id", policy.getLogisticsId());
+					errorExp.put("status", false);
+					List<Map<String, Object>> errorResult = new ArrayList<>();
+					Map<String, Object> errorMap = new HashMap<>(1);
+					errorMap.put("key", "exp_error");
+					errorMap.put("value", "策略表达式不正确,请重新修改后保存。");
+					errorResult.add(errorMap);
+					errorExp.put("error", JSON.toJSONString(errorResult));
+					testResult.add(errorExp);
+				}
+				logger.error("matchWh-compId:" + compId + ",orderId:" + id, e);
+			}
+
+			if (!isAccord) {
+				continue;
+			}
+
+			String newWhIds = policy.getWhId();
+			List<Long> whIdList = StringUtils.toArrayLong(newWhIds);
+
+			// 先解锁库存占用
+			Long newWhId = null;
+			if (isTest) {
+				newWhId = whIdList.get(0);
+				this.success(policy);
+			} else {
+				AvailableStock stock = new AvailableStock(compId, this.logger);
+				List<Map<Long, Long>> list = searchIterater(id);
+				boolean result = true;
+				for (Long tmp : whIdList) {
+					if (isManual && (orderStatus == null || orderStatus != 0)) {//如果手动重新分配仓库，控制匹配到的仓库类型
+						EcsErpSysWh tmpSysWh = EcsErpSysWhCache.getSysWh(compId, tmp);
+						if (sysWh.getWhType() != tmpSysWh.getWhType()) {//1、之前仓库和匹配到的仓库类型不同的情况下
+							if (sysWh.getWhType() == 3) {				//2、如果之前仓库为第三方仓，说明匹配到的是自有仓
+								continue;
+							}else if(tmpSysWh.getWhType() == 3){			//3、如果匹配到的是第三方仓，说明之前是自有仓
+								continue;
+							}
+						}
+					}
+					stock.unLock(id);
+					if (!updateWhId(logger, compId, id, tmp, mergeOrderList, stock.getIsCheckStock(),isManual)) {
+						break;
+					}
+					
+					newWhId = tmp;
+					if (list != null && list.size() > 1) {
+						for (Map<Long, Long> map : list) {
+							if (!updatePrdtId(map, id, stock.getIsCheckStock())) {
+								break;
+							}
+							result = stock.autoWhLock(id, checkLock);
+							if (!result) {
+								break;
+							}
+							stock.unLock(id);
+						}
+						if (!result) {
+							break;
+						}
+					} else {//没有迭代，按照原计划进行
+						result = stock.autoWhLock(id, checkLock);
+						if (!result) {
+							break;
+						}
+					}
+				}
+				if (result && list.size() > 1) {//如果一直都没库存,就按着最开始的商品关联
+					updatePrdtId(list.get(0), id, stock.getIsCheckStock());
+				}
+
+				//更新重更新表头库存占用状态
+				if (whIdList.size() > 1 || list.size() > 1) {
+					stock.updateLockStatus(id,orderType);						
+				}
+			}
+			this.values.put("wh_id", newWhId);
+			if (isTest)
+				continue;
+			return true;
+		}
+		return false;
+	}
+
+	private List<Map<Long, Long>> searchIterater(Long id) {
+		List<Map<Long, Long>> list = new ArrayList<>();
+		DruidPooledConnection con = null;
+		DAOBase dao = null;
+		try {
+			dao = new DAOBase(con = PoolConnection.getCompConnection(compId), compId);
+			List<Map<String,Object>> objList= dao.ExecuteReaderMaps("select e.order_type,e.shipping_type,site_id from ecs_erp_orders e where e.comp_id = ? and id = ? limit 1;", new Object[]{compId,id});
+			if(CollectionUtils.isEmpty(objList)){
+				return list;
+			}
+			Map<String,Object> obj = objList.get(0);
+			String shippingType = StringUtils.toString(obj.get("shipping_type"));
+			Long siteId = StringUtils.toLong(obj.get("site_id"));
+			Integer siteType = EcsErpSysSiteCache.getSysSite(compId, siteId).getSiteType();
+			List<Map<String,Object>> detailList = dao.ExecuteReaderMaps("select e.id,e.prdt_id,shipping_type from ecs_erp_orders_details e where e.comp_id = ? and e.parent_id = ? order by e.id asc;", new Object[]{compId,id});
+			if(CollectionUtils.isEmpty(detailList)){
+				return list;
+			}
+			Map<Long,Long>base =  new HashMap<Long,Long>();
+			Map<Long,String>shippingMap =  new HashMap<Long,String>();
+			for(Map<String,Object> each : detailList){
+				base.put((Long)each.get("id"), (Long)each.get("prdt_id"));
+				shippingMap.put((Long)each.get("id"), StringUtils.toString(each.get("shipping_type")));
+			}
+			
+			List<Map<Long, List<Long>>> prdtIdList = new ArrayList<Map<Long,List<Long>>>();
+			for(Long detailId : base.keySet()){
+				Map<Long,List<Long>> eachMap = new HashMap<Long,List<Long>>();
+				Long prdtId = base.get(detailId);
+				String eachShippingType = shippingMap.get(detailId);
+				boolean isIterator = true;
+	            if (SiteSelfSendEnum.isSelfSendMain(siteType) && SiteSelfSendEnum.valueOf(siteType, shippingType)!=null){
+	                isIterator = false;
+	            } else if (SiteSelfSendEnum.isSelfSendItem(siteType) && SiteSelfSendEnum.valueOf(siteType, eachShippingType)!=null) {
+	                isIterator = false;
+	            }
+				List<Long> eachList = new ArrayList<Long>();
+				if(isIterator){
+					List<Map<String,Object>> iterateList = dao.ExecuteReaderMaps("select prdt_id from ecs_erp_sys_prdt_iterate_details where comp_id = ? and parent_id in(select parent_id from ecs_erp_sys_prdt_iterate_details where comp_id = ? and prdt_id = ?) order by version asc ", new Object[]{compId,compId,prdtId});
+					if(iterateList==null || iterateList.isEmpty()){
+						eachList.add(prdtId);
+					}else{
+						for(Map<String,Object> each : iterateList){
+							eachList.add((Long)each.get("prdt_id"));
+						}
+					}
+				}else{
+					eachList.add(prdtId);
+				}
+				eachMap.put(detailId, eachList);
+				prdtIdList.add(eachMap);
+			}
+			
+			return iterateList(prdtIdList);
+			
+		} catch (Exception e) {
+			if (dao != null) {
+				try {
+					dao.RollbackTransaction();
+				} catch (SQLException e1) {
+				}
+			}
+			logger.error("AutoWhLogistics.updateWhId:" + e.getMessage());
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (Exception e) {
+				}
+			}
+		}
+		return list;
+	}
+	private static List<Map<Long, Long>> iterateList(List<Map<Long, List<Long>>> prdtIdList) {
+		List<Map<Long, Long>> anList = new ArrayList<Map<Long, Long>>();
+		Map<Long, List<Long>> prdtIdMap = prdtIdList.get(0);
+		Long detailId = prdtIdMap.keySet().iterator().next();
+		List<Long> eachPrdtList = prdtIdMap.get(detailId);
+		if(prdtIdList.size() == 1){
+			for(Long prdtId : eachPrdtList){
+				Map<Long,Long> map = new HashMap<Long,Long>();
+				map.put(detailId, prdtId);
+				anList.add(map);
+			}
+			return anList;
+		}else{
+			List<Map<Long,Long>> list = iterateList(prdtIdList.subList(1, prdtIdList.size()));
+			for(Map<Long,Long> each : list){
+				for(Long prdtId : eachPrdtList){
+					Map<Long,Long> copy = new HashMap<>();
+					copy.putAll(each);
+					copy.put(detailId, prdtId);
+					anList.add(copy);
+				}
+			}
+		}
+		return anList;
+	}
+	private boolean updatePrdtId(Map<Long, Long> map, Long id,Boolean checkNoStock) {
+		DruidPooledConnection con = null;
+		DAOEcsErpOrdersDetails daoDetail = null;
+		DAOEcsErpOrders dao = null;
+		String sql3 = "UPDATE ecs_erp_orders_details "
+				+ " SET prdt_id = ?, prdt_code = ?, prdt_name = ?, properties_name = ?, "
+				+ " unit_id = ?, spc = ? , weight = ? WHERE comp_id = ? AND id = ?; ";
+
+		String sql4 = "SELECT SUM(IFNULL(a.volume,0.00)*IFNULL(o.qty,0.00)) prdt_volume, "
+				+ " SUM(IFNULL(a.height,0.00)*IFNULL(o.qty,0.00)) prdt_height,"
+				+ " SUM(IFNULL(a.weight,0.00)*IFNULL(o.qty,0.00)) prdt_weight, "
+				+ " MAX(IFNULL(a.width,0.00)) prdt_width, "
+				+ " MAX(IFNULL(a.length,0.00)) prdt_length "
+				+ " FROM ecs_erp_orders_details o "
+				+ " LEFT OUTER JOIN ( SELECT id,volume,height,weight,width,length "
+				+ "    FROM ecs_erp_sys_prdt WHERE comp_id = " + compId + " ) a  "
+						+ " ON o.prdt_id = a.id AND o.comp_id = " + compId + "  "
+				+ " WHERE o.comp_id = ? AND o.parent_id = ? ;";
+		
+		String chk1 = "SELECT 1 FROM ecs_erp_orders_details "
+				+ "WHERE comp_id = ? AND parent_id = ? AND ifnull(prdt_id,0) <= 0 LIMIT 1 ; ";
+		try {
+			dao = new DAOEcsErpOrders(con = PoolConnection.getCompConnection(compId), compId);
+			daoDetail = new DAOEcsErpOrdersDetails(con, compId);
+			dao.StartTransaction();
+			if (checkNoStock) {
+				Object result = dao.ExecuteScalar(
+						"SELECT 1 FROM ecs_erp_orders_details o WHERE o.comp_id = ? AND o.parent_id = ? AND IFNULL(o.qty_lock,0) > 0 LIMIT 1; ",
+						new Object[]{compId, id});
+
+				if (result != null) {
+					// 说明还存在占用
+					dao.RollbackTransaction();
+					return false;
+				}
+			}
+			for(Long detailId : map.keySet()){
+				EcsErpSysPrdt prdt = EcsErpSysPrdtCache.getSysPrdt(compId, map.get(detailId));
+				dao.ExecuteNoneQuery(sql3,
+						new Object[] { prdt.getId(), prdt.getPrdtCode(), prdt.getPrdtName(),
+								prdt.getPropertiesName(), prdt.getUnitId(), prdt.getSpc(), prdt.getWeight(), compId, detailId });
+			}
+			Map<String, Object> obj = dao.GetFieldsValue(id, "site_id,order_type,pay_time,order_date,merge_status,wh_id,post_fee,discount_fee,sellings_fee,accounts_fee,adjust_fee");
+			List<Object> params = new ArrayList<Object>();
+			StringBuilder sqlsb = new StringBuilder();
+			sqlsb.append(" UPDATE ecs_erp_orders SET");
+			// 更新本地商品编码不匹配标识
+			Object checkResult = dao.ExecuteScalar(chk1, new Object[] { compId, id });
+			boolean isPrdtMismatch = checkResult != null ? true : false;
+			sqlsb.append(" is_prdt_mismatch = ?,");
+			params.add(isPrdtMismatch);
+			//更新长、宽、高、重量、体积
+			List<Map<String, Object>> cal = dao.ExecuteReaderMaps(sql4, new Object[] { compId, id });
+			if (cal != null && cal.size() > 0) {
+				sqlsb.append(" prdt_volume = ?, prdt_height = ?, prdt_weight = ?, prdt_width = ?, prdt_length = ?,");
+				params.add(cal.get(0).get("prdt_volume"));
+				params.add(cal.get(0).get("prdt_height"));
+				params.add(cal.get(0).get("prdt_weight"));
+				params.add(cal.get(0).get("prdt_width"));
+				params.add(cal.get(0).get("prdt_length"));
+			}
+			sqlsb = sqlsb.delete(sqlsb.length() - 1, sqlsb.length());
+			sqlsb.append(" WHERE comp_id = ? AND id = ? ; ");
+			if (params.size() > 0) {
+				params.add(compId);
+				params.add(id);
+				dao.ExecuteNoneQuery(sqlsb.toString(), params.toArray());
+			}
+			Integer orderType = StringUtils.toInteger(obj.get("order_type"));
+			List<EcsErpOrdersDetails> orderDetails = daoDetail.getModelDetails(id);
+			// 将表头的运费、整单优惠分到表身,并处理误差
+			BigDecimal amtnTotal = BigDecimal.ZERO;
+			for (EcsErpOrdersDetails orderDetail : orderDetails) {
+				amtnTotal = amtnTotal.add(StringUtils.toBigDecimal(orderDetail.getAmtn(), BigDecimal.ZERO));
+			}
+			if (amtnTotal.compareTo(BigDecimal.ZERO) > 0) {
+				BigDecimal postFee = StringUtils.toBigDecimal(obj.get("post_fee"), BigDecimal.ZERO); // 运费
+				BigDecimal discountFee = StringUtils.toBigDecimal(obj.get("discount_fee"), BigDecimal.ZERO); // 整单优惠金额
+				BigDecimal sellingsFee = StringUtils.toBigDecimal(obj.get("sellings_fee"), BigDecimal.ZERO); // 交易销售佣金
+				BigDecimal accountsFee = StringUtils.toBigDecimal(obj.get("accounts_fee"), BigDecimal.ZERO); // 账号支付佣金
+				BigDecimal adjustFee = StringUtils.toBigDecimal(obj.get("adjust_fee"), BigDecimal.ZERO); // 其它金额
+
+				BigDecimal postFeeTotal = BigDecimal.ZERO;
+				BigDecimal discountFeeTotal = BigDecimal.ZERO;
+				BigDecimal sellingsFeeTotal = BigDecimal.ZERO;
+				BigDecimal accountsFeeTotal = BigDecimal.ZERO;
+				BigDecimal adjustFeeTotal = BigDecimal.ZERO;
+
+				EcsErpOrdersDetails detailpostFee = null;
+				EcsErpOrdersDetails detaildiscountFee = null;
+				EcsErpOrdersDetails detailsellingsFee = null;
+				EcsErpOrdersDetails detailaccountsFee = null;
+				EcsErpOrdersDetails detailadjustFee = null;
+				for (EcsErpOrdersDetails orderDetail : orderDetails) {
+					if (orderDetail.getAmtn() == null) {
+						orderDetail.setAmtn(BigDecimal.ZERO);
+					}
+					if(OrderTypeEnum.LAZADA.value() != orderType){//lazada不需要分摊运费,优惠金额，直接下载时有返回
+            			if (postFee != null && postFee.compareTo(BigDecimal.ZERO) > 0) {
+            				BigDecimal post_fee = (orderDetail.getAmtn().divide(amtnTotal, 8, BigDecimal.ROUND_DOWN).multiply(postFee)).setScale(2,BigDecimal.ROUND_HALF_DOWN);
+            				orderDetail.setPostFeeTrade(post_fee);
+            				postFeeTotal = postFeeTotal.add(post_fee);
+            				if (orderDetail.getAmtn().compareTo(BigDecimal.ZERO) > 0) {
+            					detailpostFee = orderDetail;
+            				}
+            			}
+            			if (discountFee != null && discountFee.compareTo(BigDecimal.ZERO) > 0) {
+            				BigDecimal discount_fee = (orderDetail.getAmtn().divide(amtnTotal, 8, BigDecimal.ROUND_DOWN).multiply(discountFee)).setScale(2,BigDecimal.ROUND_HALF_DOWN);
+            				orderDetail.setDiscountFeeTrade(discount_fee);
+            				discountFeeTotal = discountFeeTotal.add(discount_fee);
+            				if (orderDetail.getAmtn().compareTo(BigDecimal.ZERO) > 0) {
+            					detaildiscountFee = orderDetail;
+            				}
+            			}
+            		}else{
+            			postFeeTotal = postFee;
+            			discountFeeTotal = discountFee;
+            		}
+                    if (sellingsFee != null && sellingsFee.compareTo(BigDecimal.ZERO) > 0) {
+                        BigDecimal sellings_fee = (orderDetail.getAmtn().divide(amtnTotal, 8, BigDecimal.ROUND_DOWN).multiply(sellingsFee)).setScale(2,BigDecimal.ROUND_HALF_DOWN);
+                        orderDetail.setSellingsFeeTrade(sellings_fee);
+                        sellingsFeeTotal = sellingsFeeTotal.add(sellings_fee);
+                        if (orderDetail.getAmtn().compareTo(BigDecimal.ZERO) > 0) {
+                        	detailsellingsFee = orderDetail;
+                        }
+                    }
+                    if (accountsFee != null && accountsFee.compareTo(BigDecimal.ZERO) > 0) {
+                        BigDecimal accounts_fee = (orderDetail.getAmtn().divide(amtnTotal, 8, BigDecimal.ROUND_DOWN).multiply(accountsFee)).setScale(2,BigDecimal.ROUND_HALF_DOWN);
+                        orderDetail.setAccountsFeeTrade(accounts_fee);
+                        accountsFeeTotal = accountsFeeTotal.add(accounts_fee);
+                        if (orderDetail.getAmtn().compareTo(BigDecimal.ZERO) > 0) {
+                        	detailaccountsFee = orderDetail;
+                        }
+                    }
+                    
+                    if (adjustFee != null && adjustFee.compareTo(BigDecimal.ZERO) != 0) {
+                        BigDecimal adjust_fee = (orderDetail.getAmtn().divide(amtnTotal, 8, BigDecimal.ROUND_DOWN).multiply(adjustFee)).setScale(2,BigDecimal.ROUND_HALF_DOWN);
+                        orderDetail.setAdjustFeeTrade(adjust_fee);
+                        adjustFeeTotal = adjustFeeTotal.add(adjust_fee);
+                        if (orderDetail.getAmtn().compareTo(BigDecimal.ZERO) > 0) {
+                        	detailadjustFee = orderDetail;
+                        }
+                    }
+				}
+
+				// 处理误差值
+				BigDecimal diffpostFee = postFee.subtract(postFeeTotal);
+                BigDecimal diffdiscountFee = discountFee.subtract(discountFeeTotal);
+                BigDecimal diffsellingsFee = sellingsFee.subtract(sellingsFeeTotal);
+                BigDecimal diffaccountsFee = accountsFee.subtract(accountsFeeTotal);
+                BigDecimal diffadjustFee = adjustFee.subtract(adjustFeeTotal);
+                
+                if(diffpostFee.compareTo(BigDecimal.ZERO) != 0){
+                    if(detailpostFee != null){
+                    	if(detailpostFee.getPostFeeTrade() == null){
+                    		detailpostFee.setPostFeeTrade(BigDecimal.ZERO);
+                    	}
+                        detailpostFee.setPostFeeTrade(detailpostFee.getPostFeeTrade().add(diffpostFee));
+                    }
+                }
+                if(diffdiscountFee.compareTo(BigDecimal.ZERO) != 0){ 
+                    if(detaildiscountFee != null){
+                    	if(detaildiscountFee.getDiscountFeeTrade() == null){
+                    		detaildiscountFee.setDiscountFeeTrade(BigDecimal.ZERO);
+                    	}
+                        detaildiscountFee.setDiscountFeeTrade(detaildiscountFee.getDiscountFeeTrade().add(diffdiscountFee));
+                    }
+                }
+                if(diffsellingsFee.compareTo(BigDecimal.ZERO) != 0){ 
+                    if(detailsellingsFee != null){
+                    	if(detailsellingsFee.getSellingsFeeTrade() == null){
+                    		detailsellingsFee.setSellingsFeeTrade(BigDecimal.ZERO);
+                    	}
+                    	detailsellingsFee.setSellingsFeeTrade(detailsellingsFee.getSellingsFeeTrade().add(diffsellingsFee));
+                    }
+                }
+                if(diffaccountsFee.compareTo(BigDecimal.ZERO) != 0){ 
+                    if(detailaccountsFee != null){
+                    	if(detailaccountsFee.getAccountsFeeTrade() == null){
+                    		detailaccountsFee.setAccountsFeeTrade(BigDecimal.ZERO);
+                    	}
+                    	detailaccountsFee.setAccountsFeeTrade(detailaccountsFee.getAccountsFeeTrade().add(diffaccountsFee));
+                    }
+                }
+                
+                if(diffadjustFee.compareTo(BigDecimal.ZERO) != 0){ 
+                    if(detailadjustFee != null){
+                    	if(detailadjustFee.getAdjustFeeTrade() == null){
+                    		detailadjustFee.setAdjustFeeTrade(BigDecimal.ZERO);
+                    	}
+                    	detailadjustFee.setAdjustFeeTrade(detailadjustFee.getAdjustFeeTrade().add(diffadjustFee));
+                    }
+                }
+    			StringBuilder updateSql = new StringBuilder();
+    			updateSql.append(" UPDATE ecs_erp_orders_details SET");
+    			updateSql.append(" discount_fee_trade = ?, post_fee_trade = ?,");
+    			updateSql.append(" sellings_fee_trade = ?, accounts_fee_trade = ?, adjust_fee_trade = ? ");
+    			updateSql.append(" WHERE comp_id = ? AND id = ? ; ");
+    			List<Object[]> updateParams = new ArrayList<Object[]>();
+				for (EcsErpOrdersDetails orderDetail : orderDetails) {
+					updateParams.add(new Object[] { 
+							orderDetail.getDiscountFeeTrade(), orderDetail.getPostFeeTrade(),
+							orderDetail.getSellingsFeeTrade(), orderDetail.getAccountsFeeTrade(), orderDetail.getAdjustFeeTrade(),
+							compId, orderDetail.getId() });
+				}
+				// 更新
+				if (updateParams.size() > 0) {
+					dao.ExecuteNoneQueryBatch(updateSql.toString(), updateParams);
+				}
+			}
+			dao.CommitTransaction();
+			return true;
+		} catch (Exception e) {
+			if (dao != null) {
+				try {
+					dao.RollbackTransaction();
+				} catch (SQLException e1) {
+				}
+			}
+			logger.error("AutoWhLogistics.updateWhId:" + e.getMessage());
+			return false;
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (Exception e) {
+				}
+			}
+		}
+
+	}
+
+	/**
+	 * 第三方商品关联规则
+	 * @return 返回匹配成功的策略ID,没有匹配到返回null
+	 */
+	public Map<String,String> thdPrdtReltRegul() {
+		String state = "fail";
+		String result = "规则匹配失败!";
+		Map<String, String> re = new HashMap<>();
+		if (null == values || values.isEmpty()) {
+			re.put("state", state);
+			result = "无对应订单记录!";
+			re.put("result", result);
+			return re;
+		}
+
+		Integer orderStatus = (Integer) this.values.get("order_status");
+
+		EcsErpSysPoliciesModel models = EcsErpSysPoliciesCache.getSysPolicies(compId, 5);
+		if (models == null || models.getList().size() <= 0) {
+			result = "规则为空，请先添加规则";
+			re.put("state", state);
+			re.put("result", result);
+			return re;
+		}
+		for (EcsErpSysPolicies policy : models.getList()) {
+			String exp = policy.getConditExpr();
+			if (StringUtils.isEmpty(exp)) {
+				state = "success";
+				result = StringUtils.toString(policy.getId());
+				break;
+			}
+			try {
+				if (this.exec(exp, this.values, policy.getConditObj(), compId)) {
+					state = "success";
+					result = StringUtils.toString(policy.getId());
+					break;
+				}
+			} catch (Exception e) {
+				logger.error(e.getMessage(), e);
+				state = "fail";
+				result = "规则匹配异常";
+			}
+		}
+		re.put("state", state);
+		re.put("result", result);
+		return re;
+	}
+
+	/**
+	 * 2.策略分物流
+	 */
+	public boolean matchLogistics(boolean ignoreZdExpress) {
+		return matchLogistics(ignoreZdExpress, true);
+	}
+
+	/**
+	 * 2.策略分物流
+	 */
+	public boolean matchLogistics(boolean ignoreZdExpress, boolean reload) {
+		errorMsg = "";
+
+		if(reload) {
+			this.values = this.getValues(0, false);
+		}
+
+		if (null == values || values.isEmpty()) {
+			return false;
+		}
+
+		if(isTest) {
+			logger.error("matchLogistics:"+values);
+		}
+		Boolean isZdExpress = (Boolean) this.values.get("is_zd_express");
+		Integer mergeStatus = (Integer) this.values.get("merge_status");
+		String mergeOrder = (String) this.values.get("merge_order");
+		Long whId = (Long) this.values.get("wh_id");
+		Boolean isCombinedOrder = StringUtils.toBoolean(this.values.get("is_combined_order"),false);
+		Integer orderType = (Integer) this.values.get("order_type");
+		String shippingType = (String)this.values.get("shipping_type");
+        String logisticType = (String)this.values.get("logistics_type");
+		Date created = StringUtils.toDateTime(this.values.get("created"));
+		
+		if(OrderTypeEnum.SHOPEE.value() == orderType && "SLS".equals(shippingType)){
+			errorMsg = "Shopee SLS订单不分配物流";
+			return true;
+		}
+		
+		// 合并订单子订单不处理
+		if (mergeStatus != null && mergeStatus >= 2) {
+			errorMsg = "合并订单子订单不处理";
+			return false;
+		}
+
+		//美特多平台，配送方式me1，不需要指定物流
+		if(OrderTypeEnum.Mercadolibre.value() == orderType && !"me1".equals(shippingType)){
+			addLogistics(LogisticsTypeEnum.Mercadolibre.value());
+			return true;
+		}
+
+        //美特多全球购平台，logistic_type<>fulfillment 且shipment mode=me2时，无需进行物流商下单
+        if(OrderTypeEnum.MercadolibreGBL.value() == orderType && logisticType.indexOf("me2") > -1
+        && !"fulfillment".equals(shippingType)){
+            addLogistics(LogisticsTypeEnum.MercadolibreGBL.value());
+            return true;
+        }
+
+		// 未指定发货仓库不处理
+		if (whId == null || whId <= 0) {
+			errorMsg = "未指定发货仓库不处理";
+			return false;
+		}
+		// 手动指定物流公司则不再分配
+		if (!ignoreZdExpress && isZdExpress != null && isZdExpress) {
+			errorMsg = "手动指定物流公司则不再分配";
+			return true;
+		}
+
+		boolean isBattery = false;
+		if (this.values.containsKey("is_battery")) {
+			String str = StringUtils.toString(this.values.get("is_battery"));
+			if (!StringUtils.isEmpty(str) && "1".equals(str)) {
+				isBattery = true;
+			}
+		}
+
+		List<Long> mergeOrderList = StringUtils.toArrayLong(mergeOrder);
+		
+		//#43245  若商家新增了物流公司“Wishpost EPC”，则EPC订单下载到系统会自动分配到此物流；若没有则按照物流策略进行分配。可手动选择EPC物流。
+		if(orderType != null && OrderTypeEnum.WISH.value() == orderType) {
+			if(isCombinedOrder){
+				EcsErpSysLogistics logistics = getLogisticsByCode(compId,whId);
+				if(logistics!=null){
+					if (this.updateLogisticsId(logger, compId, id, logistics.getId(), mergeOrderList)) {
+						return true;
+					}
+				}
+			}
+		}
+
+		EcsErpSysPoliciesModel models = EcsErpSysPoliciesCache.getSysPolicies(compId, 1);
+		if (models == null || models.getList().size()<=0) {
+			errorMsg = "策略为空，请先添加策略。";
+			return false;
+		}
+		//非测试，开启了智选物流则运行智选物流的逻辑
+		if (!isTest && SysParams.getIntellectLogistics(compId)){
+			IntellectLogistics logistics = new IntellectLogistics(this.compId, 0L,"","", logger);
+			logistics.matchLogistics(this.values);
+			return true;
+		}
+		for (EcsErpSysPolicies policy : models.getList()) {
+			if (isTest && policiesIds != null && !policiesIds.contains(policy.getId().toString())) {
+				continue;
+			}
+			String whIds = policy.getLogisticsWhId();
+			if (StringUtils.join(",", whIds, ",").indexOf(StringUtils.join(",", whId, ",")) == -1) {
+				if (isTest) {
+					Map<String, Object> record = new HashMap<>();
+					record.put("id", policy.getId());
+					record.put("ply_name", policy.getPlyName());
+					record.put("wh_name", policy.getWhName());
+					record.put("level", policy.getPlyLevel());
+					record.put("logistics_wh_name",policy.getLogisticsWhName());
+					record.put("logistics_id",policy.getLogisticsId());
+					record.put("status", false);
+					record.put("tip", "匹配失败：仓库不匹配。");
+					record.put("signature_type", policy.getSignatureType());
+					record.put("wh_id",StringUtils.toArrayString(whIds).get(0));
+					testResult.add(record);
+				}
+				continue;
+			}
+			Date startDate = policy.getStartDate();
+			Date endDate = policy.getEndDate();
+			if (null != created && null != startDate && null != endDate) {
+				if (!(created.getTime() >= startDate.getTime() && created.getTime() <= endDate.getTime())) {
+					if (isTest) {
+						Map<String, Object> record = new HashMap<>();
+						record.put("id", policy.getId());
+						record.put("ply_name", policy.getPlyName());
+						record.put("wh_name", policy.getWhName());
+						record.put("level", policy.getPlyLevel());
+						record.put("logistics_wh_name", policy.getLogisticsWhName());
+						record.put("logistics_id", policy.getLogisticsId());
+						record.put("status", false);
+						record.put("tip", "匹配失败：生效时间不匹配。");
+						record.put("signature_type", policy.getSignatureType());
+						record.put("wh_id",StringUtils.toArrayString(whIds).get(0));
+						testResult.add(record);
+					}
+					continue;
+				}
+			}
+
+			String exp = policy.getConditExpr();
+			boolean isAccord = true;
+			try {
+				if (!this.exec(exp, this.values, policy.getConditObj(),compId)) {
+					isAccord = false;
+					if (isTest) {
+						this.failure(policy, this.values);
+					}
+				}
+			} catch (Exception e) {
+				if (isTest) {
+					Map<String, Object> errorExp = new HashMap<>();
+					errorExp.put("id", policy.getId());
+					errorExp.put("ply_name", policy.getPlyName());
+					errorExp.put("wh_name", policy.getWhName());
+					errorExp.put("level", policy.getPlyLevel());
+					errorExp.put("logistics_wh_name", policy.getLogisticsWhName());
+					errorExp.put("logistics_id", policy.getLogisticsId());
+					errorExp.put("status", false);
+					List<Map<String, Object>> errorResult = new ArrayList<>();
+					Map<String, Object> errorMap = new HashMap<>(1);
+					errorMap.put("key", "exp_error");
+					errorMap.put("value", "策略表达式不正确,请重新修改后保存。");
+					errorResult.add(errorMap);
+					errorExp.put("error", JSON.toJSONString(errorResult));
+					errorExp.put("signature_type", policy.getSignatureType());
+					errorExp.put("wh_id",StringUtils.toArrayString(whIds).get(0));
+					testResult.add(errorExp);
+				}
+				logger.error("matchLogistics-compId:" + compId + ",orderId:" + id, e);
+			}
+
+			if (!isAccord) {
+				continue;
+			}
+			
+			Long newLogisticsId = policy.getLogisticsId();
+			EcsErpSysLogistics sysLogistics = EcsErpLogisticsWhCache.getSysLogistics(compId, whId, newLogisticsId);
+			if (null == sysLogistics || StringUtils.toBoolean(sysLogistics.getIsStop(), false)) {
+				continue;
+			}
+
+			boolean isNotWithBattery = StringUtils.toBoolean(sysLogistics.getIsWithBattery(), false);
+			if (isBattery && isNotWithBattery) {
+				if (isTest){
+					Map<String, Object> record = new HashMap<>();
+					record.put("id", policy.getId());
+					record.put("ply_name", policy.getPlyName());
+					record.put("wh_name", policy.getWhName());
+					record.put("level", policy.getPlyLevel());
+					record.put("logistics_wh_name",policy.getLogisticsWhName());
+					record.put("logistics_id",policy.getLogisticsId());
+					record.put("status", false);
+					record.put("tip", "匹配失败：该物流不支持发带电商品。");
+					record.put("signature_type", policy.getSignatureType());
+					testResult.add(record); 	
+				}
+				continue;
+			}
+			
+			if (isTest) {
+				this.success(policy);
+			} else {
+				if (!this.updateLogisticsId(logger, compId, id, newLogisticsId, mergeOrderList)) {
+					return false;
+				}
+			}
+			this.values.put("logistics_id", newLogisticsId);
+			if (isTest)
+				continue;
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 3.策略审核
+	 * @return
+	 */
+	public int matchOrders() {
+		return matchOrders(true);
+	}
+
+	/**
+	 * 3.策略审核
+	 * @return
+	 */
+	public int matchOrders(boolean reload) {
+		this.errorMsg =  "";
+
+		EcsErpSysPoliciesModel models = EcsErpSysPoliciesCache.getSysPolicies(compId, 2);
+		if (models == null || models.getList().size() <= 0) {
+			// 未设置审核条件无需审核
+			errorMsg = "【未设置审核条件无需审核】";
+			return 0;
+		}
+		if(reload) {
+			this.values = this.getValues(0, false);
+		}
+
+		if (null == values || values.isEmpty()) {
+			return -1;
+		}
+
+		// 合并订单审核
+		Integer mergeStatus = (Integer) this.values.get("merge_status");
+		if (mergeStatus != null && mergeStatus == 2) {
+			Long mergeId = this.getMergeId(compId, id);
+			if (null == mergeId) {
+				errorMsg = "【合并订单异常】";
+				return -1;
+			}
+			this.id = mergeId;
+			this.values = this.getValues(0, true);
+			if (this.values == null || this.values.size() <= 0) {
+				errorMsg = "【合并订单异常】";
+				return -1;
+			}
+		}
+		if(!isTest){
+			// 订单状态
+			Integer orderStatus = (Integer) this.values.get("order_status");
+			if (orderStatus == null) {
+				errorMsg = "【订单异常】";
+				return -1;
+			}
+			if (orderStatus != 0) {
+				// 只有待审核订单才需要过滤审核策略
+				errorMsg = "【只有待审核订单才需要过滤审核策略】";
+				return 0;
+			}
+			// 发货仓库
+			Long whId = (Long) this.values.get("wh_id");
+			if (StringUtils.isEmpty(whId)) {
+				errorMsg = "【发货仓库不能为空】";
+				return 0;
+			}
+			Integer transactionStatus = (Integer) this.values.get("transaction_status");
+			if (transactionStatus != null && transactionStatus.equals(-1)) {
+				errorMsg = "【交易已关闭】";
+				return 0;
+			}
+			// 非正常订单无法审核
+			Integer proOrderStatus = (Integer) this.values.get("pro_order_status");
+			if (proOrderStatus != null && proOrderStatus == 3) {
+				errorMsg = "【非正常订单无法审核】";
+				return 0;
+			}
+			Boolean isPrdtMismatch = (Boolean) this.values.get("is_prdt_mismatch");
+			// 是否检测商品编码
+			if (isPrdtMismatch != null && isPrdtMismatch) {
+				errorMsg = "【商品编码不匹配】";
+				return 0;
+			}
+			Boolean checkNoStock = SysParams.getCheckNoStock(compId);
+			if (checkNoStock) {
+				Boolean isNoStock = (Boolean) this.values.get("is_nostock");
+				// 检测是否缺货
+				if (isNoStock != null && isNoStock) {
+					errorMsg = "【订单缺货】";
+					return 0;
+				}
+			}
+			String isRisk =  StringUtils.toString(this.values.get("is_risk"));
+			if (StringUtils.equals(isRisk, "1")) {
+				errorMsg = "【Shopify风险订单】";
+				return -1;
+			}
+		}
+
+		//取默认审核匹配值
+		this.values.put("is_default", this.checkDefaultPolicies(this.values));
+
+		for (EcsErpSysPolicies logPolicies : models.getList()) {
+			if (isTest && policiesIds != null && !policiesIds.contains(logPolicies.getId().toString())) {
+				continue;
+			}
+			String exp = logPolicies.getConditExpr();
+			boolean isAccord = true;
+			try {
+				if (this.exec(exp, this.values, logPolicies.getConditObj(), compId)) {
+					isAccord = false;
+					if (isTest) {
+						this.success(logPolicies);
+					}
+				} else {
+					if (isTest && logPolicies.getPlyLevel() != 0) {
+						this.failure(logPolicies, this.values);
+					}
+				}
+			} catch (Exception e) {
+				if (isTest) {
+					Map<String, Object> errorExp = new HashMap<>();
+					errorExp.put("id", logPolicies.getId());
+					errorExp.put("ply_name", logPolicies.getPlyName());
+					errorExp.put("wh_name", logPolicies.getWhName());
+					errorExp.put("level", logPolicies.getPlyLevel());
+					errorExp.put("logistics_wh_name", logPolicies.getLogisticsWhName());
+					errorExp.put("logistics_id", logPolicies.getLogisticsId());
+					errorExp.put("status", false);
+					List<Map<String, Object>> errorResult = new ArrayList<>();
+					Map<String, Object> errorMap = new HashMap<>(1);
+					errorMap.put("key", "exp_error");
+					errorMap.put("value", "策略表达式不正确,请重新修改后保存。");
+					errorResult.add(errorMap);
+					errorExp.put("error", JSON.toJSONString(errorResult));
+					testResult.add(errorExp);
+				}
+				//表达式错误，改为匹配成功，不执行审核
+				isAccord = false;
+				logger.error("matchOrders-compId:" + compId + ",orderId:" + id + ",ply_id:" + logPolicies.getId(), e);
+			}
+
+			if (!isAccord) {
+				if (isTest) {
+					continue;
+				} else {
+					saveSticker(logPolicies);
+					errorMsg += "\n【匹配策略】" + logPolicies.getPlyName();
+					return 0;
+				}
+			}
+		}
+		return 1;
+	}
+
+	/**
+	 * 4.自动备注策略
+	 */
+	public boolean matchAutoRemark(boolean isUpdate) {
+		return matchAutoRemark(isUpdate, true);
+	}
+	/**
+	 * 4.自动备注策略
+	 */
+	public boolean matchAutoRemark(boolean isUpdate, boolean reload) {
+		errorMsg = "";
+		EcsErpSysPoliciesModel models = EcsErpSysPoliciesCache.getSysPolicies(compId, 3);
+		if (models == null || models.getList().size() <= 0) {
+			// 未设置审核条件无需审核
+			errorMsg = "【未设置自动备注审核条件无需审核】";
+			return false;
+		}
+		if(reload) {
+			this.values = this.getValues(0, false);
+		}
+		if (null == values || values.isEmpty()) {
+			return false;
+		}
+
+		// 合并订单审核
+		Integer mergeStatus = (Integer) this.values.get("merge_status");
+		if (mergeStatus != null && mergeStatus == 2) {
+			Long mergeId = this.getMergeId(compId, id);
+			if (null == mergeId) {
+				errorMsg = "【合并订单异常】";
+				logger.error(errorMsg);
+				return false;
+			}
+			this.id = mergeId;
+			this.values = this.getValues(0, true);
+			if (values == null || values.size() <= 0) {
+				errorMsg = "【合并订单异常】";
+				logger.error(errorMsg);
+				return false;
+			}
+		}
+		for (EcsErpSysPolicies logPolicies : models.getList()) {
+			if (isTest && policiesIds != null && !policiesIds.contains(logPolicies.getId().toString())) {
+				continue;
+			}
+			String exp = logPolicies.getConditExpr();
+			try {
+				if (this.exec(exp, this.values, logPolicies.getConditObj(), compId)) {
+					this.successAutoRemark(logPolicies);
+				} else {
+					this.failure(logPolicies, this.values);
+				}
+			} catch (Exception e) {
+				if (isTest) {
+					Map<String, Object> errorExp = new HashMap<>();
+					errorExp.put("id", logPolicies.getId());
+					errorExp.put("ply_name", logPolicies.getPlyName());
+					errorExp.put("wh_name", logPolicies.getWhName());
+					errorExp.put("level", logPolicies.getPlyLevel());
+					errorExp.put("logistics_wh_name", logPolicies.getLogisticsWhName());
+					errorExp.put("logistics_id", logPolicies.getLogisticsId());
+					errorExp.put("status", false);
+					List<Map<String, Object>> errorResult = new ArrayList<>();
+					Map<String, Object> errorMap = new HashMap<>(1);
+					errorMap.put("key", "exp_error");
+					errorMap.put("value", "策略表达式不正确,请重新修改后保存。");
+					errorResult.add(errorMap);
+					errorExp.put("error", JSON.toJSONString(errorResult));
+					testResult.add(errorExp);
+				}
+				logger.error("matchAutoRemark-compId:" + compId + ",orderId:" + id + ",ply_id:" + logPolicies.getId(), e);
+			}
+		}
+
+		if (isUpdate) {
+			//判断是否走过自动备注策略
+			insertMemo(this.values, getTestResult());
+		}
+		return true;
+	}
+
+	/**
+     * 检查是否命中默认模板的条件，
+     * 命中返回 true ，否则返回 false
+     */
+    private Boolean checkDefaultPolicies(Map<String,Object> order) {
+    	// is_refund/is_more/buyer_message/seller_memo/wh_id/logistsics_id/is_diff_addrs/is_prdt_mismatch
+    	if (order == null) {
+    		return true;
+    	}
+    	// 1、退款中订单
+    	Boolean isRefund = StringUtils.toBoolean(order.get("is_refund"), false);
+    	if (isRefund) {
+			errorMsg = "【默认策略】退款中订单";
+    		return true;
+    	}
+    	//2、缺货的订单
+    	if(isTest){
+    		Boolean checkNoStock = SysParams.getCheckNoStock(compId);
+    		if (checkNoStock) {
+    			Boolean isNoStock = (Boolean) order.get("is_nostock");
+    			// 检测是否缺货
+    			if (isNoStock != null && isNoStock) {
+    				return true;
+    			}
+    		}
+    	}
+    	//4、一买家多订单
+    	Boolean isMore = StringUtils.toBoolean(order.get("is_more"), false);
+    	if (isMore) {
+			errorMsg = "【默认策略】多单";
+    		return true;
+    	}
+    	// 6、有买家留言的订单
+    	String buyerMessage = StringUtils.toString(order.get("buyer_message"));
+    	if (!StringUtils.isEmpty(buyerMessage)) {
+			errorMsg = "【默认策略】有买家留言";
+    		return true;
+    	}
+    	// 7、有卖家备注的订单
+    	String sellerMemo = StringUtils.toString(order.get("seller_memo"));
+    	if (!StringUtils.isEmpty(sellerMemo)) {
+			errorMsg = "【默认策略】有卖家备注";
+    		return true;
+    	}
+    	// 8、未分配到发货仓库的订单
+    	Long whId = StringUtils.toLong(order.get("wh_id"));
+    	if (StringUtils.isEmpty(whId)) {
+			errorMsg = "【默认策略】未分配到发货仓库";
+    		return true;
+    	}
+    	// 10、部分商品是AE仓发货的速卖通订单(表头shipping_type为空)
+    	Integer orderType = StringUtils.toInteger(order.get("order_type"));
+    	String shippingType = StringUtils.toString(order.get("shipping_type"));
+    	Boolean isPartJianhuo = SiteSelfSendEnum.isSelfSendItem(orderType)&&StringUtils.isEmpty(shippingType);
+    	if(isPartJianhuo){
+    		return true;
+    	}
+    	if(SiteSelfSendEnum.valueOf(orderType, shippingType)==null){//平台自发货的不用验证物流
+    		// 9、未分配到物流公司的订单
+    		Long logisticsId = StringUtils.toLong(order.get("logistics_id"));
+    		if (StringUtils.isEmpty(logisticsId)) {
+    			errorMsg = "【默认策略】未分配到物流公司";
+    			return true;
+    		}
+    	}
+    	
+    	// 11、网上商品编码与系统商品编码不匹配的订单
+    	Boolean isPrdtMismatch = StringUtils.toBoolean(order.get("is_prdt_mismatch"), false);
+    	if (isPrdtMismatch) {
+			errorMsg = "【默认策略】编码不匹配";
+    		return true;
+    	}
+    	// 5、有站内信的订单
+        DruidPooledConnection con = null;
+        DAOBase dao = null;
+        try{
+        	Long id = StringUtils.toLong(order.get("id"));
+        	Long siteId = StringUtils.toLong(order.get("site_id"));
+        	String buyerNick = StringUtils.toString(order.get("buyer_nick"));
+        	Date msgDate = DateUtils.getCurrentDate(-15);
+        	if (StringUtils.isEmpty(id) ||
+        			StringUtils.isEmpty(siteId) || 
+        			StringUtils.isEmpty(buyerNick)) {
+				errorMsg = "【默认策略】buyerNick为空!";
+        		return true;
+        	}
+            dao = new DAOBase(con=PoolConnection.getSlaveConnection(compId), compId);
+            Object checkObj = dao.ExecuteScalar(
+                "SELECT 1 FROM ecs_erp_msg_details WHERE comp_id = ? AND site_id = ? AND sender_name in(?,?) and msg_date > ? LIMIT 1",
+                new Object[]{ compId, siteId, SecurityUtils.encrypt(compId, buyerNick), SecurityUtils.decrypt(compId, buyerNick), msgDate});
+            if (checkObj != null) {
+				errorMsg = "【默认策略】有站内信!";
+                return true;
+            }
+        }catch(Exception e){
+            logger.error("CheckOrder.checkDefaultPolicies", e);
+        }finally{
+            if(con!=null){
+                try{con.close();
+                }catch(Exception e){}
+            }
+        }
+        this.defaultFailure();
+        return false;
+    }
+	
+	public List<Map<String, Object>> getTestResult() {
+		return testResult;
+	}
+
+	private void success(EcsErpSysPolicies policy) {
+		Map<String, Object> record = new HashMap<>();
+		record.put("id", policy.getId());
+		record.put("ply_name", policy.getPlyName());
+		record.put("wh_name", policy.getWhName());
+		record.put("level", policy.getPlyLevel());
+		record.put("logistics_wh_name",policy.getLogisticsWhName());
+		record.put("logistics_id",policy.getLogisticsId());
+		record.put("logistics_code",policy.getLogisticsCode());
+		record.put("status", true);
+		record.put("tip", "匹配成功：策略匹配成功");
+		record.put("signature_type", policy.getSignatureType());
+		testResult.add(record);
+	}
+
+	
+	private void successAutoRemark(EcsErpSysPolicies policy) {
+		Map<String, Object> record = new HashMap<>();
+		record.put("id", policy.getId());
+		record.put("ply_name", policy.getPlyName());
+		record.put("wh_name", policy.getWhName());
+		record.put("level", policy.getPlyLevel());
+		record.put("logistics_wh_name",policy.getLogisticsWhName());
+		record.put("logistics_id",policy.getLogisticsId());
+		record.put("status", true);
+		record.put("tip", "匹配成功：备注内容匹配成功");
+		testResult.add(record);
+	}
+
+	private void defaultFailure() {
+		Map<String, Object> record = new HashMap<>();
+		record.put("ply_name", "系统默认审单策略");
+		record.put("level", 0);
+		record.put("status", false);
+		List<Map<String,Object>> errorList = new ArrayList<>();
+		Map<String,Object> map = new HashMap<>();
+		map.put("key", "default_failure");
+		errorList.add(map);
+		record.put("error", JSON.toJSONString(errorList));
+		testResult.add(record);
+	}
+	
+	private void failure(EcsErpSysPolicies policy, Map<String, Object> evn) {
+		Map<String, Object> record = new HashMap<>();
+		record.put("id", policy.getId());
+		record.put("ply_name", policy.getPlyName());
+		record.put("wh_name", policy.getWhName());
+		record.put("level", policy.getPlyLevel());
+		record.put("logistics_wh_name",policy.getLogisticsWhName());
+		record.put("logistics_id",policy.getLogisticsId());
+		record.put("status", false);
+		List<Map<String, Object>> errorResult = validate(policy, evn);
+		record.put("error", JSON.toJSONString(errorResult));
+		testResult.add(record);
+	}
+
+	@SuppressWarnings("unchecked")
+	private List<Map<String, Object>> validate(EcsErpSysPolicies policy, Map<String, Object> evn) {
+		String co = policy.getConditObj();
+		List<Map<String, Object>> error = new ArrayList<Map<String, Object>>();
+		if(StringUtils.isEmpty(co)){
+			return error;
+		}
+		Map<String, Object> map = JSON.parseObject(co, Map.class);
+		for (String key : map.keySet()) {
+			String value = StringUtils.toString(map.get(key));
+			if (StringUtils.isEmpty(value)) {
+				continue;
+			} else if (key.endsWith("_value")) {
+				continue;
+			} else if (key.equals("made_in_type")) {
+				continue;
+			} else if (key.equals("receiver_zip_type")) {
+				continue;
+			} else if(key.equals("other_description1_type")){
+				continue;
+			}
+
+			if ("amount".equals(key) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+			if ("post_fee".equals(key) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+			if ("all_order_prdt_up".equals(key) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+			if ("any_order_prdt_up".equals(key) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+			if ("all_order_prdt_up_post_free".equals(key) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+			if ("any_order_prdt_up_post_free".equals(key) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+
+			if (value.contains("#")) {
+				value = value.replace("#", key);
+			} else if (key.equals("spc")||"prdt_single".equals(key)){
+				
+			}else {
+				value = StringUtils.join("'", value.replaceAll("'", ""), "'");
+				StringBuffer tt = new StringBuffer();
+				
+				if("provice".equals(key)||"city".equals(key) ||"properties_name".equals(key)||"properties_title".equals(key) 
+						|| "street".equals(key) || "specifications".equals(key) || "buyer_message".equals(key)){
+					//包含
+					tt.append("EcsAviator.contains("+value+","+key+", 1)");
+				}else if("prdt_codes".equals(key) || "prdt_type".equals(key) || "battery_type".equals(key) || "prdt_logistics_type".equals(key) ){
+					//等于
+					 tt.append("EcsAviator.contains("+value+","+key+",2)");
+				}else if("made_in".equals(key)){
+					Integer madeInType = StringUtils.toInteger(map.get("made_in_type"), 1);
+					if(1 == madeInType){
+						//包含
+						tt.append("EcsAviator.contains("+value+","+key+", 1)");
+					}else{
+						tt.append("EcsAviator.contains("+value+","+key+", 4)");
+					}
+				}else if("receiver_zip".equals(key)){
+					Integer receiverZipType = StringUtils.toInteger(map.get("receiver_zip_type"), 1);
+					 if(1 == receiverZipType){
+						 tt.append("EcsAviator.contains("+value+","+key+", 1)");
+					 }else if(2 == receiverZipType){
+						 tt.append("EcsAviator.contains("+value+","+key+",2)");
+					 }else if(3 == receiverZipType){
+						 tt.append("EcsAviator.contains("+value+","+key+", 3)");
+					 }else if(4 == receiverZipType){
+						 tt.append("EcsAviator.contains("+value+","+key+", 4)");
+					 }
+				}else if("shipping_type".equals(key)){
+					tt.append("EcsAviator.contains("+value+","+key+", 2)");
+				}else if("tool_type".equals(key)){
+					Integer toolTypeCond = StringUtils.toInteger(map.get("tool_type_cond"), 1);
+					 if(1 == toolTypeCond){
+						 tt.append("EcsAviator.contains("+value+","+key+", 1)");
+					 }else if(2 == toolTypeCond){
+						 tt.append("EcsAviator.contains("+value+","+key+",7)");
+					 }else if(3 == toolTypeCond){
+						 tt.append("EcsAviator.contains("+value+","+key+", 2)");
+					 }else if(4 == toolTypeCond){
+						 tt.append("EcsAviator.contains("+value+","+key+", 9)");
+					 }
+				}else if("tool_type_cond".equals(key)){
+					Integer toolTypeCond = StringUtils.toInteger(map.get("tool_type_cond"), 1);
+					if(5 == toolTypeCond){
+						tt.append("EcsAviator.contains("+"''"+","+"tool_type"+", 10)");
+					}else if(6 == toolTypeCond){
+						tt.append("EcsAviator.contains("+"''"+","+"tool_type"+", 11)");
+					}else{
+						continue;
+					}
+				} else if ("other_description1".equals(key)) {
+					Integer description1Type = StringUtils.toInteger(map.get("other_description1_type"), 1);
+					if(1 == description1Type){
+						tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(",2)");
+					}else if(5 == description1Type){
+						tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(",5)");
+					}
+				}else{
+					tt.append("EcsAviator.contains("+value+","+key+", 2)");
+				}
+				value = tt.toString();
+			}
+			if (!this.exec(value, evn,co,compId)) {
+				Map<String, Object> e = new HashMap<String, Object>();
+				e.put("key", key);
+				e.put("exps", value);
+				e.put("value", evn.get(key));
+				error.add(e);
+			}
+		}
+		return error;
+	}
+
+	public static boolean exec(String exp, Map<String, Object> evn,String conditObj,Long compId) {
+		if (exp.contains("cur_code")){
+			exp = change(exp,conditObj,evn,compId);
+		}
+		Expression expression = AviatorEvaluator.compile(exp);
+		Map<String, Object> values = new HashMap<String, Object>();
+		for (String name : expression.getVariableNames()) {
+			values.put(name, evn.get(name));
+		}
+		return (Boolean) expression.execute(values);
+	}
+	
+	/**
+	 * 取得需要计处的数据
+	 * @return
+	 */
+	public Map<String, Object> getValues(Integer type,Boolean isMaster) {
+		DruidPooledConnection con = null;
+		DAOBase dao = null;
+		try {
+			if(isMaster){
+				con = PoolConnection.getCompConnection(compId);
+			} else {
+				con = PoolConnection.getSlaveConnection(compId);
+			}
+
+			dao = new DAOBase(con , compId);
+			// 表头
+			StringBuilder sqlsb = new StringBuilder();
+			sqlsb.append(" SELECT");
+			sqlsb.append(" o.site_id,");
+			sqlsb.append(" o.wh_id,");
+			sqlsb.append(" o.logistics_id,");
+			sqlsb.append(" o.shipping_level wl_level,");
+			sqlsb.append(" o.code_two country,");
+			sqlsb.append(" IFNULL(o.receiver_state,'') provice,");
+			sqlsb.append(" IFNULL(o.receiver_city,'') city,");
+			sqlsb.append(" IFNULL(o.receiver_address_one,'') as receiver_address_one, IFNULL(o.receiver_address_two,'') as receiver_address_two,IFNULL(o.receiver_address_three,'') as receiver_address_three,");
+			sqlsb.append(" o.cur_code,");
+			sqlsb.append(" o.amtn amount,");
+			sqlsb.append(" o.merge_status,");
+			sqlsb.append(" o.merge_order,");
+			sqlsb.append(" o.order_status,");
+			sqlsb.append(" o.is_zd_express,");
+			sqlsb.append(" o.shipping_type,");
+			sqlsb.append(" o.logistics_type,");
+			sqlsb.append(" IFNULL(o.post_fee,0) post_fee,");
+			sqlsb.append(" o.receiver_zip,");
+			sqlsb.append(" o.pro_order_status,");
+			sqlsb.append(" o.transaction_status,");
+			sqlsb.append(" o.is_prdt_mismatch,");
+			sqlsb.append(" o.is_nostock,");
+			sqlsb.append(" o.is_refund,");
+			sqlsb.append(" o.is_diff_addrs,");
+			sqlsb.append(" o.order_type,");
+			sqlsb.append(" o.buyer_message,");
+			sqlsb.append(" o.seller_memo,o.is_risk,");
+			sqlsb.append(" o.is_more,");
+			sqlsb.append(" o.id,");
+			sqlsb.append(" o.comp_id,o.is_combined_order,f.requires_delivery_confirmation,f.advanced_logistics,");
+			sqlsb.append(" o.buyer_nick,o.created, ");
+			sqlsb.append(" logistics_type AS logistics_way,");
+			sqlsb.append(" o.pay_time,o.order_date,o.site_trans_status,o.site_trade_id,o.split_child,o.split_order,h.profit,h.profit_rate,o.is_prime ");
+			sqlsb.append(" FROM ecs_erp_orders o");
+			sqlsb.append(" LEFT JOIN ecs_erp_orders_invoice h ON h.id = o.id AND h.comp_id = ?");
+			sqlsb.append(" LEFT JOIN ecs_erp_orders_flags f ON f.id = o.id AND f.comp_id = "+compId);
+			sqlsb.append(" WHERE o.comp_id = ? AND o.id = ? limit 1;");
+
+			StringBuilder zipsb = new StringBuilder();
+			zipsb.append(" SELECT * FROM ecs_erp_sys_logistics_zip WHERE comp_id = ? AND logistics_id = ? ");
+
+			List<Map<String, Object>> list = dao.ExecuteReaderMaps(sqlsb.toString(),
+					new Object[]{compId, compId, id});
+			if (list.isEmpty()) {
+				return null;
+			}
+			Map<String, Object> head = list.get(0);
+			Long siteId = (Long) head.get("site_id");
+			if (siteId == null) {
+				return null;
+			}
+			EcsErpSysSite sysSite = EcsErpSysSiteCache.getSysSite(compId, siteId);
+			if (sysSite == null) {
+				return null;
+			}
+			Integer siteType = sysSite.getSiteType();
+			head.put("site_type", siteType);
+			head.put("logistics_type", StringUtils.join(StringUtils.toString(siteType), "-", StringUtils.toString(head.get("logistics_type"))));
+			head.put("is_prime", StringUtils.toBoolean(head.get("is_prime"), false) ? 1 : 0);
+
+			//安全加密/解密
+			String secrKey = SecurityUtils.getSecret(compId + "");
+
+			head.put("buyer_nick", SecurityUtils.decrypt(StringUtils.toString(head.get("buyer_nick")), secrKey));
+			String street = SecurityUtils.decrypt(StringUtils.toString(head.get("receiver_address_one")), secrKey) + "," +
+					SecurityUtils.decrypt(StringUtils.toString(head.get("receiver_address_two")), secrKey) + "," +
+					SecurityUtils.decrypt(StringUtils.toString(head.get("receiver_address_three")), secrKey);
+			head.put("street", street);
+			boolean isDiffAddrs = StringUtils.toBoolean(head.get("is_diff_addrs"), false);
+
+			if (isDiffAddrs) {
+				head.put("is_diff_addrs", "true");
+			} else {
+				head.put("is_diff_addrs", "false");
+			}
+			boolean isRisk = StringUtils.toBoolean(head.get("is_risk"), false);
+			if (isRisk) {
+				head.put("is_risk", "1");
+			} else {
+				head.put("is_risk", "0");
+			}
+			Integer isPremiumCarrier = 0;
+			Map<String,Object> rspMap = this.getItemsResponseMap(this.compId, this.id, siteType);
+			if (null != rspMap && !rspMap.isEmpty()) {
+				isPremiumCarrier = StringUtils.toInteger(rspMap.get("is_premium_carrier"), 0);
+			}
+			head.put("is_premium_carrier", isPremiumCarrier);
+			String country = StringUtils.toString(head.get("country"));
+			Long logisticsId = StringUtils.toLong(head.get("logistics_id"));
+			String postCode = StringUtils.toString(head.get("receiver_zip")).replaceAll("-", "");
+
+			Integer isZip = 0;
+			if (logisticsId != null) {
+				List<Map<String, Object>> zipList = dao.ExecuteReaderMaps(zipsb.toString(),
+						new Object[]{compId, logisticsId});
+				if(zipList != null) {
+					for (Map<String, Object> zip : zipList) {
+						String location = StringUtils.toString(zip.get("code_two"));
+						String postBegin = StringUtils.toString(zip.get("post_begin"));
+						String postEnd = StringUtils.toString(zip.get("post_end"));
+						Integer sptStart = StringUtils.toInteger(zip.get("spt_start"));
+						Integer sptEnd = StringUtils.toInteger(zip.get("spt_end"));
+
+						Boolean status = matchPostCode(country, location, postCode, postBegin, postEnd, sptStart, sptEnd);
+						if (status) {
+							isZip = 1;
+							break;
+						}
+					}
+				}
+			}
+
+			head.put("is_zip", isZip);
+			String buyerMess = StringUtils.toString(head.get("buyer_message"));
+			if (!StringUtils.isEmpty(buyerMess)) {
+				head.put("buyer_message", buyerMess);
+			}
+
+			// 明细
+			sqlsb.setLength(0);
+			sqlsb.append(" SELECT");
+			sqlsb.append(" o.prdt_id,");
+			sqlsb.append(" o.properties_name,");
+			sqlsb.append(" o.qty,");
+			sqlsb.append(" a.prdt_type_id,");
+			sqlsb.append(" o.weight,");
+			sqlsb.append(" a.volume_type,");
+			sqlsb.append(" a.volume,");
+			sqlsb.append(" a.length,");
+			sqlsb.append(" a.width,");
+			sqlsb.append(" a.height,");
+			sqlsb.append(" o.location,");
+			sqlsb.append(" a.battery_type,");
+			sqlsb.append(" a.is_magnetic,");
+			sqlsb.append(" a.is_non_liquid_cosmetic,");
+			sqlsb.append(" a.is_paste,");
+			sqlsb.append(" a.is_with_plugs,");
+			sqlsb.append(" a.spc,");
+			sqlsb.append(" a.tool_type,");
+			sqlsb.append(" o.properties_title,");
+			sqlsb.append(" b.battery_type_name,");
+			sqlsb.append(" a.battery_type_id,");
+			sqlsb.append(" c.id as other_desc_id,");
+			sqlsb.append(" o.logistics_type,o.is_free,o.gift_detail_id,o.tags,o.up,o.post_fee_trade");
+			sqlsb.append(" FROM ecs_erp_orders_details o");
+			sqlsb.append(" LEFT JOIN ecs_erp_sys_prdt a ON o.prdt_id = a.id AND a.comp_id = ? ");
+			sqlsb.append(" LEFT JOIN ecs_erp_dev_battery_type b ON b.id = a.battery_type_id AND b.comp_id = ?");
+			sqlsb.append(" LEFT JOIN ecs_erp_sys_prdt_other_desc c ON c.id = a.other_description1 AND c.comp_id = ?");
+			sqlsb.append(" WHERE o.comp_id = ? AND o.parent_id = ?  ");
+			//如果是赠品策略则只获取非赠品的商品
+			if (type != null && type == 1) {
+				sqlsb.append(" AND IFNULL(o.is_free,0) = 0 ");
+			}
+			list = dao.ExecuteReaderMaps(sqlsb.toString(), new Object[]{compId, compId, compId, compId, id});
+			if (list.size() > 0) {
+				this.orderDetails = list;
+				StringBuilder prdtCode = new StringBuilder(",");
+				StringBuilder prdtPropertiesName = new StringBuilder();
+				StringBuilder prdtType = new StringBuilder(",");
+				StringBuilder madeIn = new StringBuilder("$");
+				StringBuilder batteryType = new StringBuilder(",");
+				StringBuilder prdtLogisticsType = new StringBuilder(",");
+				StringBuilder spcType = new StringBuilder();
+				StringBuilder toolTypeSb = new StringBuilder();
+				StringBuilder otherDescription1Ls = new StringBuilder(",");
+				Integer prdtTotal = 0;
+				BigDecimal min = BigDecimal.valueOf(Long.MAX_VALUE);
+				BigDecimal maxWidth = BigDecimal.ZERO;
+				BigDecimal minWidth = min;
+				BigDecimal maxLength = BigDecimal.ZERO;
+				BigDecimal minLength = min;
+				BigDecimal sumHeight = BigDecimal.ZERO;
+				BigDecimal maxHeight = BigDecimal.ZERO;
+				BigDecimal minHeight = min;
+				BigDecimal sumWeight = BigDecimal.ZERO;
+				BigDecimal sumVolume = BigDecimal.ZERO;
+				BigDecimal girth = BigDecimal.ZERO;
+				BigDecimal maxLen = BigDecimal.ZERO;
+				BigDecimal minLen = BigDecimal.ZERO;
+				BigDecimal lencric = BigDecimal.ZERO;
+				BigDecimal minOrderPrdtUp = min;
+				BigDecimal maxOrderPrdtUp = BigDecimal.ZERO;
+				BigDecimal minOrderPrdtUpPostFree = min;
+				BigDecimal maxOrderPrdtUpPostFree = BigDecimal.ZERO;
+				Integer isBattery = 0;
+				Integer isMagnetic = null;
+				Integer isLiquid = null;
+				Integer isPaste = null;
+				Integer isWithPlugs = null;
+				boolean isMagneticFlag = false;
+				boolean isLiquidFlag = false;
+				boolean isPasteFlag = false;
+				boolean isWithPlugsFlag = false;
+				boolean isExpress = false;
+				boolean isLeadTime = false;
+				StringBuilder prdtPropertiesTitle = new StringBuilder();
+				List<BigDecimal> maxLenList = new ArrayList<>();
+				List<BigDecimal> secondLenList = new ArrayList<>();
+				BigDecimal minLenSum = BigDecimal.ZERO;
+				Set<String> logisticsTypeSet = new HashSet<String>();
+				// 订单是否包含多种商品
+				Set<String> prdtSet = new HashSet<>();
+				for (Map<String, Object> map : list) {
+					// 订单商品编号
+					String prdtId = StringUtils.toString(map.get("prdt_id"));
+					prdtSet.add(prdtId);
+					// 订单商品属性
+					String propertiesName = StringUtils.toString(map.get("properties_name"));
+					// 订单商品类别
+					String prdtTypeId = StringUtils.toString(map.get("prdt_type_id"));
+					// 订单商品电池类型
+					String batteryTypeId = StringUtils.toString(map.get("battery_type_id"));
+					// 商品商品物流方式
+					String logisticsType = StringUtils.toString(map.get("logistics_type"));
+					// 订单商品所在地
+					String location = StringUtils.toString(map.get("location"));
+					// 订单商品规格包含
+					String spc = StringUtils.toString(map.get("spc"));
+					String toolType = StringUtils.toString(map.get("tool_type"));
+					// 其他说明1
+					String otherDescription1 = StringUtils.toString(map.get("other_desc_id"));
+					// 订单商品总数量
+					prdtTotal += StringUtils.toInteger(map.get("qty"), 0);
+					// 最大宽度
+					maxWidth = maxWidth.compareTo(StringUtils.toBigDecimal(map.get("width"), BigDecimal.ZERO)) > 0
+							? maxWidth : StringUtils.toBigDecimal(map.get("width"), BigDecimal.ZERO);
+					// 最小宽度
+					minWidth = minWidth.compareTo(StringUtils.toBigDecimal(map.get("width"), BigDecimal.ZERO)) < 0
+							? minWidth : StringUtils.toBigDecimal(map.get("width"), BigDecimal.ZERO);
+					// 最大长度
+					maxLength = maxLength.compareTo(StringUtils.toBigDecimal(map.get("length"), BigDecimal.ZERO)) > 0
+							? maxLength : StringUtils.toBigDecimal(map.get("length"), BigDecimal.ZERO);
+					// 最小长度
+					minLength = minLength.compareTo(StringUtils.toBigDecimal(map.get("length"), BigDecimal.ZERO)) < 0
+							? minLength : StringUtils.toBigDecimal(map.get("length"), BigDecimal.ZERO);
+					// 最大高度
+					maxHeight = maxHeight.compareTo(StringUtils.toBigDecimal(map.get("height"), BigDecimal.ZERO)) > 0
+							? maxHeight : StringUtils.toBigDecimal(map.get("height"), BigDecimal.ZERO);
+					// 最小高度
+					minHeight = minHeight.compareTo(StringUtils.toBigDecimal(map.get("height"), BigDecimal.ZERO)) < 0
+							? minHeight : StringUtils.toBigDecimal(map.get("height"), BigDecimal.ZERO);
+					
+					// 最小成交价
+					minOrderPrdtUp = minOrderPrdtUp.compareTo(StringUtils.toBigDecimal(map.get("up"), BigDecimal.ZERO)) < 0
+							? minOrderPrdtUp : StringUtils.toBigDecimal(map.get("up"), BigDecimal.ZERO);
+					// 最大成交价
+					maxOrderPrdtUp = maxOrderPrdtUp.compareTo(StringUtils.toBigDecimal(map.get("up"), BigDecimal.ZERO)) > 0
+							? maxOrderPrdtUp : StringUtils.toBigDecimal(map.get("up"), BigDecimal.ZERO);
+					
+					BigDecimal postFeeTrade = StringUtils.toBigDecimal(map.get("post_fee_trade"), BigDecimal.ZERO);
+					BigDecimal upAndPostTmp = StringUtils.toBigDecimal(map.get("up"), BigDecimal.ZERO).add(postFeeTrade);
+					minOrderPrdtUpPostFree = minOrderPrdtUpPostFree.compareTo(upAndPostTmp) < 0
+							? minOrderPrdtUpPostFree : upAndPostTmp;
+					maxOrderPrdtUpPostFree = maxOrderPrdtUpPostFree.compareTo(upAndPostTmp) > 0
+							? maxOrderPrdtUpPostFree : upAndPostTmp;
+					
+					// 总高度
+					sumHeight = sumHeight.add(StringUtils.toBigDecimal(map.get("height"), BigDecimal.ZERO)
+							.multiply(StringUtils.toBigDecimal(map.get("qty"), BigDecimal.ZERO)));
+					// 总重量（g）
+					BigDecimal w = StringUtils.toBigDecimal(map.get("weight"), BigDecimal.ZERO);
+					sumWeight = sumWeight.add(w);
+					// 总体积（cm3）
+					BigDecimal v = StringUtils.toBigDecimal(map.get("volume"), BigDecimal.ZERO);
+					v = v.multiply(StringUtils.toBigDecimal(map.get("qty"), BigDecimal.ZERO));
+					sumVolume = sumVolume.add(v);
+					// 最大边长
+					maxLen = maxWidth.compareTo(maxLength) > 0
+							? (maxWidth.compareTo(maxHeight) > 0 ? maxWidth : maxHeight)
+							: (maxLength.compareTo(maxHeight) > 0 ? maxLength : maxHeight);
+					// 最小边长
+					minLen = minWidth.compareTo(minLength) < 0
+							? (minWidth.compareTo(minHeight) < 0 ? minWidth : minHeight)
+							: (minLength.compareTo(minHeight) < 0 ? minLength : minHeight);
+
+					//获取长宽高进行排序，最小边乘数量累加，最大边与次边长加入集合
+					List<BigDecimal> lengthWidthHeight = new ArrayList<>();
+					lengthWidthHeight.add(StringUtils.toBigDecimal(map.get("width"), BigDecimal.ZERO));
+					lengthWidthHeight.add(StringUtils.toBigDecimal(map.get("length"), BigDecimal.ZERO));
+					lengthWidthHeight.add(StringUtils.toBigDecimal(map.get("height"), BigDecimal.ZERO));
+					Collections.sort(lengthWidthHeight);
+					minLenSum = minLenSum.add(lengthWidthHeight.get(0).multiply(StringUtils.toBigDecimal(map.get("qty"), BigDecimal.ZERO)));
+					secondLenList.add(lengthWidthHeight.get(1));
+					maxLenList.add(lengthWidthHeight.get(2));
+
+					// 订单商品是否带电
+					String batteryTypeName = StringUtils.toString(map.get("battery_type_name"));
+					// 只要有一个带电商品,就为带电
+					if (!StringUtils.isEmpty(batteryTypeName)) {
+						if (!"无电池".equals(batteryTypeName)) {
+							isBattery = 1;
+						}
+					}
+
+					// 带磁性
+					String isMagneticStr = StringUtils.toString(map.get("is_magnetic"));
+					// 当商品磁性状态为1时，商品带磁性
+					if (isMagneticStr == null || !"true".equalsIgnoreCase(isMagneticStr.trim().toString())) {
+						isMagnetic = 0;
+					} else {
+						isMagnetic = 1;
+						isMagneticFlag = true;
+					}
+
+					//商品是否带液体
+					String is_liquid = StringUtils.toString(map.get("is_non_liquid_cosmetic"));
+					// 当商品是否带液体状态为1时，商品带液体
+					if (is_liquid == null || !"true".equalsIgnoreCase(is_liquid.trim().toString())) {
+						isLiquid = 0;
+					} else {
+						isLiquid = 1;
+						isLiquidFlag = true;
+					}
+
+					//商品是否带膏状
+					String is_paste = StringUtils.toString(map.get("is_paste"));
+					// 当商品是否带膏状状态为1时，商品膏状
+					if (is_paste == null || !"true".equalsIgnoreCase(is_paste.trim().toString())) {
+						isPaste = 0;
+					} else {
+						isPaste = 1;
+						isPasteFlag = true;
+					}
+
+					//商品是否带插头
+					String is_with_plugs = StringUtils.toString(map.get("is_with_plugs"));
+					if (is_with_plugs == null || !"true".equalsIgnoreCase(is_with_plugs.trim().toString())) {
+						isWithPlugs = 0;
+					} else {
+						isWithPlugs = 1;
+						isWithPlugsFlag = true;
+					}
+
+					// 订单网上商品属性
+					String propertiesTitle = StringUtils.toString(map.get("properties_title"));
+					Map<String, Object> result = new HashMap<String, Object>();
+					if (!StringUtils.isEmpty(prdtId)) {
+						prdtCode.append(prdtId).append(",");
+					}
+					if (!StringUtils.isEmpty(propertiesName)) {
+						prdtPropertiesName.append(propertiesName).append(",");
+					}
+
+					if (!StringUtils.isEmpty(prdtTypeId)) {
+						prdtType.append(prdtTypeId).append(",");
+					}
+
+					if (!StringUtils.isEmpty(batteryTypeId)) {
+						batteryType.append(batteryTypeId).append(",");
+					}
+
+					if (!StringUtils.isEmpty(logisticsType)) {
+						prdtLogisticsType.append(siteType).append("-").append(logisticsType).append(",");
+						logisticsTypeSet.add(new StringBuilder(siteType).append("-").append(logisticsType).toString());
+					}
+
+					if (!StringUtils.isEmpty(location)) {
+						madeIn.append(location).append("$");
+					}
+
+					if (!StringUtils.isEmpty(propertiesTitle)) {
+						prdtPropertiesTitle.append(propertiesTitle).append(",");
+					}
+					if (!StringUtils.isEmpty(spc)) {
+						spcType.append(spc).append(",");
+					}
+					if (!StringUtils.isEmpty(toolType)) {
+						toolTypeSb.append(toolType).append(",");
+					}
+					if (!StringUtils.isEmpty(otherDescription1)) {
+						otherDescription1Ls.append(otherDescription1).append(",");
+					}
+					head.put("p" + prdtId + "p", StringUtils.toInteger(map.get("qty"), 0));
+					String tags = StringUtils.toString(map.get("tags"));
+					if(tags.contains("HBA_UP_EXPRESS")){
+						isExpress = true;
+					}
+					if(tags.contains("leadTimeTag")){
+						isLeadTime = true;
+					}
+				}
+				if (!CollectionUtils.isEmpty(prdtSet)) {
+					if (prdtSet.size() > 1) {
+						head.put("is_contain_more_product", 1);
+					} else {
+						head.put("is_contain_more_product", 0);
+					}
+				}
+				if (logisticsTypeSet != null && logisticsTypeSet.size() > 1) {
+					head.put("is_mul_lgt", 1);
+				} else {
+					head.put("is_mul_lgt", 0);
+				}
+				BigDecimal maxLen2 = Collections.max(maxLenList);
+				BigDecimal secondLen2 = Collections.max(secondLenList);
+				BigDecimal minLenSum2 = minLenSum;
+				//0：最小边长 1：次边长 2：最大边长
+				List<BigDecimal> lenList = new ArrayList<BigDecimal>() {{
+					add(maxLen2);
+					add(secondLen2);
+					add(minLenSum2);
+				}};
+				Collections.sort(lenList);
+				BigDecimal secondLen = lenList.get(1);
+
+				// 周长
+				girth = maxLength.add((BigDecimal.valueOf(2).multiply((maxWidth.add(sumHeight)))));
+				// 长+周长
+				lencric = maxLength.add(girth);
+				
+				head.put("min_order_prdt_up", minOrderPrdtUp);
+				head.put("max_order_prdt_up", maxOrderPrdtUp);
+				
+				head.put("min_order_prdt_up_post_free", minOrderPrdtUpPostFree);
+				head.put("max_order_prdt_up_post_free", maxOrderPrdtUpPostFree);
+				Boolean isCombinedOrder = StringUtils.toBoolean(head.get("is_combined_order"), false);
+				if (isCombinedOrder) {
+					head.put("is_wish_epc", 1);
+				}else{
+					head.put("is_wish_epc", 0);
+				}
+				Boolean requiresDeliveryConfirmation = StringUtils.toBoolean(head.get("requires_delivery_confirmation"), false);
+				if (requiresDeliveryConfirmation) {
+					head.put("is_wish_delivery", 1);
+				}else{
+					head.put("is_wish_delivery", 0);
+				}
+				Boolean advancedLogistics = StringUtils.toBoolean(head.get("advanced_logistics"), false);
+				if (advancedLogistics) {
+					head.put("is_wish_a", 1);
+				}else{
+					head.put("is_wish_a", 0);
+				}
+				
+				head.put("width", maxWidth);
+				head.put("length", maxLength);
+				head.put("weight", sumWeight);
+				head.put("volume", sumVolume);
+				head.put("height", sumHeight);
+				head.put("maxlen", maxLen);
+				head.put("secondlen", secondLen);
+				head.put("minlen", minLen);
+				head.put("girth", girth);
+				head.put("lencric", lencric);
+				head.put("prdt_total", prdtTotal);
+				head.put("lenwidhei", maxWidth.add(maxLength).add(sumHeight));
+				head.put("is_express", isExpress);
+				if(isLeadTime){
+					head.put("is_lead_time", 1);
+				}else{
+					head.put("is_lead_time", 0);
+				}
+				
+				if (isMagneticFlag) {
+					head.put("is_magnetic", 1);
+				} else {
+					head.put("is_magnetic", 0);
+				}
+				if (isPasteFlag) {
+					head.put("is_paste", 1);
+				} else {
+					head.put("is_paste", 0);
+				}
+				if (isLiquidFlag) {
+					head.put("is_liquid", 1);
+				} else {
+					head.put("is_liquid", 0);
+				}
+				if (isWithPlugsFlag) {
+					head.put("is_with_plugs", 1);
+				} else {
+					head.put("is_with_plugs", 0);
+				}
+				head.put("is_battery", isBattery);
+				head.put("prdt_codes", prdtCode.toString());
+				head.put("all_prdt_codes", prdtCode.toString());
+				head.put("properties_name", prdtPropertiesName.toString());
+				head.put("prdt_type", prdtType.toString());
+				head.put("other_description1", otherDescription1Ls.toString());
+				head.put("made_in", madeIn.toString());
+				head.put("properties_title", prdtPropertiesTitle.toString());
+				head.put("battery_type", batteryType.toString());
+				head.put("prdt_logistics_type", prdtLogisticsType.toString());
+				head.put("specifications", spcType.toString());
+				head.put("tool_type", toolTypeSb.toString());
+				return head;
+			}
+		} catch (Exception e) {
+			logger.error("BizUtils.DownAutoWhAndLogistics:" + e.getMessage());
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (Exception e) {
+				}
+			}
+		}
+		return null;
+	}
+
+	private boolean updateWhId(Logger logger, Long compId, Long id, Long whId, List<Long> mergeOrderList,
+							   boolean checkNoStock,boolean isManual) {
+		DruidPooledConnection con = null;
+		DAOBase dao = null;
+		Integer orderStatus = (Integer) this.values.get("order_status");
+		Date current = DateUtils.getCurrentDateTime();
+		try {
+			dao = new DAOBase(con = PoolConnection.getCompConnection(compId), compId);
+			String sqltext1 = "UPDATE ecs_erp_orders SET wh_id = ?,modified = ? WHERE comp_id = ? AND id = ? ";
+			String sqltext2 = "UPDATE ecs_erp_orders_details SET wh_id = ? WHERE comp_id =? AND parent_id = ? ";
+			String warOutId = StringUtils.toString(dao.ExecuteReaderMaps("SELECT war_out_id FROM ecs_erp_orders WHERE comp_id = ? AND id = ? ;", new Object[]{compId, id}));
+			//如果订单处于第三方仓带配货，同时修改出库单发货仓库
+			String sqltext3 = "UPDATE ecs_erp_war_out SET wh_id = ?,thd_prv = ?,modified = ? WHERE comp_id =? AND id = ? ";
+			
+			if (checkNoStock) {
+				Object result = dao.ExecuteScalar(
+						"SELECT 1 FROM ecs_erp_orders_details o WHERE o.comp_id = ? AND o.parent_id = ? AND IFNULL(o.qty_lock,0) > 0 LIMIT 1; ",
+						new Object[]{compId, id});
+
+				if (result != null) {
+					// 说明还存在占用
+					return false;
+				}
+			}
+			EcsErpSysWh tmpSysWh = EcsErpSysWhCache.getSysWh(compId, whId);
+			
+			dao.StartTransaction();
+			dao.ExecuteNoneQuery(sqltext1, new Object[]{whId,current, compId, id});
+			dao.ExecuteNoneQuery(sqltext2, new Object[]{whId, compId, id});
+			if (isManual && (orderStatus == null || orderStatus != 0) && tmpSysWh.getWhType() == 3 && !StringUtils.isEmpty(warOutId) ) {
+				dao.ExecuteNoneQuery(sqltext3, new Object[]{whId,tmpSysWh.getThdPrv(),current, compId, id});
+			}
+			if (mergeOrderList != null && mergeOrderList.size() > 0) {
+				dao.ExecuteNoneQuery("UPDATE ecs_erp_orders SET wh_id = ? " + "WHERE comp_id = ? AND id IN ("
+						+ StringUtils.toArrayLong(mergeOrderList) + ")", new Object[]{whId, compId});
+				dao.ExecuteNoneQuery("UPDATE ecs_erp_orders_details SET wh_id = ? "
+								+ "WHERE comp_id = ? AND parent_id IN (" + StringUtils.toArrayLong(mergeOrderList) + ")",
+						new Object[]{whId, compId});
+			}
+			dao.CommitTransaction();
+			return true;
+		} catch (Exception e) {
+			if (dao != null) {
+				try {
+					dao.RollbackTransaction();
+				} catch (SQLException e1) {
+				}
+			}
+			logger.error("AutoWhLogistics.updateWhId:" + e.getMessage());
+			return false;
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (Exception e) {
+				}
+			}
+		}
+	}
+
+	public static boolean updateLogisticsId(Logger logger, Long compId, Long id, Long logisticsId, List<Long> mergeOrderList) {
+		String logisticsName = "";
+		EcsErpSysLogistics sysLogistics = EcsErpSysLogisticsCache.getSysLogistics(compId, logisticsId);
+		if (sysLogistics != null) {
+			logisticsName = sysLogistics.getLogisticsName();
+		}
+
+		DruidPooledConnection con = null;
+		DAOBase dao = null;
+		try {
+			dao = new DAOBase(con = PoolConnection.getCompConnection(compId), compId);
+			List<Long> idList = new ArrayList<>();
+			idList.add(id);
+			if (mergeOrderList != null && mergeOrderList.size() > 0) {
+				idList.addAll(mergeOrderList);
+			}
+			List<Map<String,Object>> list = dao.ExecuteReaderMaps("select war_out_id from ecs_erp_orders where comp_id= ? and id in (" + StringUtils.toArrayLong(idList) + ")", new Object[]{compId});
+			List<Long> warIdList = new ArrayList<>();
+			if(!CollectionUtils.isEmpty(list)){
+				for(Map<String,Object> each : list){
+					Long warOutId = (Long)each.get("war_out_id");
+					if(warOutId != null){
+						warIdList.add(warOutId);				
+					}
+				}
+			}
+			dao.StartTransaction();
+			dao.ExecuteNoneQuery("UPDATE ecs_erp_orders o "
+							+ " SET o.logistics_id = ?, o.logistics_name = ? "
+							+ " WHERE o.comp_id = ? AND o.id in ("+StringUtils.toArrayLong(idList)+")",
+					new Object[]{logisticsId, logisticsName, compId});
+			
+			if (warIdList.size() > 0) {
+				dao.ExecuteNoneQuery("UPDATE ecs_erp_war_out o"
+								+ " SET o.logistics_id = ?, o.logistics_name = ? "
+								+ " WHERE o.comp_id = ? AND o.id in (" + StringUtils.toArrayLong(warIdList) + ")",
+						new Object[]{logisticsId, logisticsName, compId});
+			}
+			dao.CommitTransaction();
+			return true;
+		} catch (Exception e) {
+			if (dao != null) {
+				try {
+					dao.RollbackTransaction();
+				} catch (SQLException e1) {
+				}
+			}
+			logger.error("BizUtils.updateLogisticsId:" + e.getMessage());
+			return false;
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (Exception e) {
+				}
+			}
+		}
+	}
+	
+	private Long getMergeId(Long compId, Long id){
+        DruidPooledConnection con = null;
+        DAOBase dao = null;
+        try{
+            dao = new DAOBase(con=PoolConnection.getCompConnection(compId), compId);
+            return StringUtils.toLong(dao.ExecuteScalar(
+                "SELECT parent_id FROM ecs_erp_orders_details WHERE comp_id = ? AND parent_id_old = ? LIMIT 1 ",
+                new Object[]{compId, id}));
+        }catch(Exception e){
+            logger.error("CheckOrder.getMergeOrder:"+e.getMessage());
+        }finally{
+            if(con!=null){
+                try{con.close();
+                }catch(Exception e){}
+            }
+        }
+        return null;
+    }
+	
+	private EcsErpSysLogistics getLogisticsByCode(Long compId,Long whId){
+        DruidPooledConnection con = null;
+        DAOEcsErpSysLogistics dao = null;
+        DAOEcsErpSysLogisticsWh whDao = null;
+        try{
+            dao = new DAOEcsErpSysLogistics(con=PoolConnection.getCompConnection(compId), compId);
+            whDao = new DAOEcsErpSysLogisticsWh(con,compId);
+            EcsErpSysLogistics logistics = dao.getModel("WISH_36-1",4);
+            if(logistics!=null){
+            	//仓库需要一致才添加
+	            Boolean flag = whDao.isExists(whId, logistics.getId());
+	            if(!flag){
+	            	logistics = null;
+	            }
+            }
+            return logistics;
+        }catch(Exception e){
+            logger.error("SysLogistics.getLogisticsByCode:"+e.getMessage());
+        }finally{
+            if(con!=null){
+                try{con.close();
+                }catch(Exception e){}
+            }
+        }
+        return null;
+    }
+	
+	/**
+	 * 订单新增备注
+	 * @param map
+	 * @param testRecord
+	 */
+	private void insertMemo(Map<String, Object> map,List<Map<String, Object>> testRecord){
+		StringBuilder sql = new StringBuilder();
+		sql.append(" INSERT INTO ecs_erp_orders_rem(id,comp_id,memo_sticker,pay_time,order_date)");
+		sql.append(" VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE");
+		sql.append(" memo_sticker = CONCAT(IFNULL(memo_sticker,''),VALUES(memo_sticker))");
+		List<Object> params = new ArrayList<Object>();
+        params.add(map.get("id"));
+        params.add(map.get("comp_id"));
+        
+        StringBuilder memo_sticker = new StringBuilder();
+        if(testRecord !=null && testRecord.size()>0){
+        	for(Map<String,Object> m:testRecord){
+        		boolean status = StringUtils.toBoolean(m.get("status"),false) ;
+        		if(status){
+        			memo_sticker = memo_sticker.append(m.get("ply_name")+";");
+        		}
+        	}
+        }
+        params.add(memo_sticker.toString());
+        params.add(map.get("pay_time"));
+        params.add(map.get("order_date"));
+        
+        DruidPooledConnection con = null;
+        DAOBase dao = null;
+			try {
+				dao = new DAOBase(con = PoolConnection.getCompConnection(compId), compId);
+				dao.StartTransaction();
+				SQLHelper.ExecuteNoneQuery(con, sql.toString(), params.toArray());
+				dao.CommitTransaction();
+			} catch (SQLException e) {
+				try {
+					dao.RollbackTransaction();
+				} catch (SQLException e1) {
+				}
+				logger.error(e.getMessage());
+			}finally{
+	            if(con!=null){
+	                try{con.close();
+	                }catch(Exception e){}
+	            }
+	        }
+		
+	}
+
+	/**
+	 * 5.赠品策略分配赠品
+	 * 注意此方法把商品总数量改了
+	 * @param isAgain	是否重新分配
+	 */
+	public Integer gift(Boolean isAgain) {
+		errorMsg = "";
+		EcsErpPoliciesGiftModel models = EcsErpPoliciesGiftCache.getPoliciesGift(compId, 0);
+		if (models == null || models.getList().size() <= 0) {
+			errorMsg = "【策略为空，请先添加策略。】";
+			return 0;
+		}
+		//如果已分配赠品策略且不是再次重新分配，则退出匹配
+		if (!isTest && (null == values || values.isEmpty())) {
+			return -1;
+		}
+		if (!isAgain && !isTest && checkGift()) {
+			errorMsg = "【已分配赠品策略！】";
+			return 0;
+		}
+		//重新赋值，查询订单明细排除赠品
+		this.values = this.getValues(1, false);
+		if (null == values || values.isEmpty()) {
+			return -1;
+		}
+		Long siteId = (Long) this.values.get("site_id");
+		if (StringUtils.isEmpty(siteId)) {
+			errorMsg = "【网店不能为空】";
+			return 0;
+		}
+		Integer orderType = StringUtils.toInteger(this.values.get("order_type"), 0);
+		if (orderType == 1003 || orderType == 1002) {
+			errorMsg = "补发订单或换货订单不处理";
+			return 0;
+		}
+		Integer mergeStatus = StringUtils.toInteger(this.values.get("merge_status"), 0);
+		// 合并订单子订单不处理
+		if (mergeStatus >= 1) {
+			errorMsg = "合并的订单不处理";
+			return 0;
+		}
+		Integer transactionStatus = StringUtils.toInteger(this.values.get("transaction_status"), 0);
+		if (transactionStatus != 1 && transactionStatus != 2) {
+			errorMsg = "【订单只对已付款和部分发货的订单添加赠品！】";
+			return 0;
+		}
+
+		Map<Long, EcsErpPoliciesGift> gifts = new HashMap<>();
+		for (EcsErpPoliciesGift gift : models.getList()) {
+			if (isTest && policiesIds != null && !policiesIds.contains(gift.getId().toString())) {
+				continue;
+			}
+			//如果是拆单则只匹配拆单的策略，否则匹配网上订单的策略
+			String ordetTypeS = "," + gift.getOrderType() + ",";
+			if (ordetTypeS.equals(",,")) {
+				continue;
+			}
+			//此处的筛选感觉放在获取数据的时候筛选比较好
+			switch (orderType) {
+				//手工单
+				case 0:
+					if (!ordetTypeS.contains(",3,")) {
+						this.failure(gift, "订单类型匹配失败!");
+						continue;
+					}
+					break;
+				//拆单
+				case 1001:
+					if (!ordetTypeS.contains(",2,")) {
+						this.failure(gift, "订单类型匹配失败!");
+						continue;
+					}
+					break;
+				//网上订单
+				default:
+					if (!ordetTypeS.contains(",1,")) {
+						this.failure(gift, "订单类型匹配失败!");
+						continue;
+					}
+					break;
+			}
+			String exp = gift.getConditExpr();
+			boolean isAccord = true;
+			if (gift.getSites().contains(StringUtils.toLong(this.values.get("site_id")))) {
+				Date date;
+				switch (gift.getDateType()) {
+					//订单拍下时间
+					case 1:
+						date = StringUtils.toDateTime(this.values.get("order_date"));
+						break;
+					//订单付款时间
+					case 2:
+						date = StringUtils.toDateTime(this.values.get("pay_time"));
+						break;
+					//默认拍下时间
+					default:
+						date = StringUtils.toDateTime(this.values.get("order_date"));
+						break;
+				}
+
+				if (date != null && date.after(gift.getStartDate()) && date.before(gift.getEndDate())) {
+					//设置商品总数量，此处指的商品总数量是指条件里面的指定商品总数量
+					this.values.put("prdt_total", getPrdtTotal(gift));
+					try {
+						if (this.exec(exp, this.values, gift.getConditObj(), compId)) {
+							isAccord = false;
+							if (isTest) {
+								this.success(gift);
+							}
+						} else {
+							if (isTest) {
+								this.failure(gift, this.values);
+							}
+						}
+					} catch (Exception e) {
+						if (isTest) {
+							Map<String, Object> errorExp = new HashMap<>();
+							errorExp.put("id", gift.getId());
+							errorExp.put("ply_name", gift.getPlyName());
+							errorExp.put("status", false);
+							List<Map<String, Object>> errorResult = new ArrayList<>();
+							Map<String, Object> errorMap = new HashMap<>(1);
+							errorMap.put("key", "exp_error");
+							errorMap.put("value", "策略表达式不正确,请重新修改后保存。");
+							errorResult.add(errorMap);
+							errorExp.put("error", JSON.toJSONString(errorResult));
+							testResult.add(errorExp);
+						} else {
+							logger.error("gift-compId:" + compId + ",orderId:" + id, e);
+						}
+					}
+				} else {
+					if (isTest) {
+						this.failure(gift, "订单不在活动时间内!");
+					}
+				}
+			} else {
+				if (isTest) {
+					this.failure(gift, "订单网店不匹配!");
+				}
+			}
+			if (!isAccord && !isTest) {
+				//记录符合赠品策略的ID
+				gifts.put(gift.getId(), gift);
+			}
+		}
+		if (!isTest) {
+			addGiftDetail(gifts, isAgain);
+		}
+		return 1;
+	}
+
+
+	/**
+	 * 获取策略里指定商品的数量，不是订单所有商品的数量
+	 */
+	private Integer getPrdtTotal(EcsErpPoliciesGift gift) {
+		Map conditExpr = JSON.parseObject(gift.getConditObj(), Map.class);
+		Set<Long> prdtIds = new HashSet<>();
+		prdtIds.addAll(StringUtils.toArrayLong(StringUtils.toString(conditExpr.get("all_prdt_codes"))));
+		prdtIds.addAll(StringUtils.toArrayLong(StringUtils.toString(conditExpr.get("prdt_codes"))));
+		Integer prdtTotal = 0;
+		for (Map<String, Object> orderDetail : orderDetails) {
+			if (!StringUtils.toBoolean(orderDetail.get("is_free"),false) && prdtIds.contains(StringUtils.toLong(orderDetail.get("prdt_id")))) {
+				prdtTotal = prdtTotal + StringUtils.toInteger(orderDetail.get("qty"));
+			}
+		}
+		return prdtTotal;
+	}
+
+	/**
+	 * 添加赠品信息
+	 */
+	private void addGiftDetail(Map<Long, EcsErpPoliciesGift> gifts, Boolean isAgain) {
+		if (this.values == null || this.values.isEmpty()) {
+			return;
+		}
+
+		DruidPooledConnection con = null;
+		DAOEcsErpPoliciesGift daoGift;
+		DAOEcsErpOrders dao = null;
+		try {
+			dao = new DAOEcsErpOrders(con = PoolConnection.getCompConnection(compId), compId);
+			daoGift = new DAOEcsErpPoliciesGift(con, compId);
+			//在此处开启事务的原因是：如果是重新分配则会先删除订单上的赠品再找赠品明细
+			//如果是重新分配，先删除赠品,会写已赠送数量
+			boolean isStart = false;
+			if (isAgain != null && isAgain) {
+				isStart = true;
+				dao.StartTransaction();
+				deleteGiftDetail(dao);
+			}
+			if (gifts != null && !gifts.isEmpty()) {
+				List<EcsErpPoliciesGiftDetails> details = new ArrayList<>();
+				for (Long parentId : gifts.keySet()) {
+					List<EcsErpPoliciesGiftDetails> details1 = daoGift.getDetailModel(parentId);
+					if (details1 != null && !details1.isEmpty()) {
+						details.addAll(details1);
+					}
+				}
+
+				List<Object[]> detailList = new ArrayList<>();
+				List<Object[]> giftDetailList = new ArrayList<>();
+				StringBuilder memoGift = new StringBuilder();
+				EcsCompSubusers adminUser = EcsCompSubusersCache.getAdmin(compId);
+				Long userId = 0L;
+				String userCode = "";
+				String userName = "";
+				if (adminUser != null) {
+					userId = adminUser.getUserId();
+					userCode = adminUser.getUserCode();
+					userName = adminUser.getUserName();
+				}
+
+
+				boolean isSelfSend = SiteSelfSendEnum.isSelfSendItem(OrderTypeUtils.getMainOrderType(id, dao));
+				String siteSql = "SELECT site_id FROM ecs_erp_orders WHERE comp_id = ? AND id = ? ";
+				Long siteId = StringUtils.toLong(dao.ExecuteScalar(siteSql.toString(), new Object[]{compId, id}));
+
+				EcsErpSysSite sysSite = EcsErpSysSiteCache.getSysSite(compId, siteId);
+				//获取一次明细匹配数据源
+				List<Map<String, Object>> detailEvn = new ArrayList<>();
+				for (Map<String, Object> orderDetail : orderDetails) {
+					detailEvn.add(getEvn(orderDetail));
+				}
+				Date currentTime = DateUtils.getCurrentDateTime();
+				for (EcsErpPoliciesGiftDetails detail : details) {
+					EcsErpSysPrdt prdt = EcsErpSysPrdtCache.getSysPrdt(compId, detail.getPrdtId());
+					if (prdt == null) {
+						continue;
+					}
+
+					Integer qty = detail.getQty();
+					EcsErpPoliciesGift gift = gifts.get(detail.getParentId());
+					//计算倍增数量
+					//数量 = 赠送数量*倍增倍数
+					if (detail.getIsDouble()) {
+						qty = qty * getTimes(gift, detailEvn);
+					}
+					//赠品送完即止,空为无上限
+					if (!(detail.getMaxQty() == null || detail.getMaxQty() <= 0)) {
+						if ((detail.getMaxQty() - detail.getGiftQty()) < qty) {
+							qty = detail.getMaxQty() - detail.getGiftQty();
+						}
+					}
+					if (qty <= 0) {
+						continue;
+					}
+					List<Object> par = getDetail(gift, prdt, this.values);
+					par.add(qty);
+					par.add(0);
+					par.add(0);
+					par.add(this.values.get("wh_id"));
+					par.add(0);
+					par.add(StringUtils.toBigDecimal(prdt.getWeight(), BigDecimal.ZERO).multiply(new BigDecimal(qty)));
+					par.add(detail.getId());
+					if (isSelfSend) {
+						par.add(SiteSelfSendEnum.getDefaultShippingType(sysSite.getSiteType()));
+					} else {
+						par.add("");
+					}
+					par.add(dao.putSeqNo("OID", currentTime));
+					detailList.add(par.toArray());
+					giftDetailList.add(new Object[]{qty, compId, detail.getId()});
+					memoGift.append("赠品策略【").append(gift.getPlyName()).append("】").append(detail.getPrdtCode()).append(",");
+				}
+
+				//如果不是重新分配赠品，则在此处开启事务
+				if (!detailList.isEmpty()) {
+					//meal_id,meal_code,meal_name,bat_id,
+					String sqlDetail = " INSERT INTO ecs_erp_orders_details(" +
+							" comp_id, parent_id,parent_id_old,prdt_id,prdt_code,prdt_name,title,properties_title,properties_name," +
+							" spc,unit_id,status,site_trans_status,is_free,is_meal,order_date,order_status,site_id,pro_order_status, outer_id,memo_info,pay_time," +
+							" qty,up,amtn,wh_id,discount_fee,weight,gift_detail_id,shipping_type,oid)" +
+							" VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ";
+					String sqlOrder = " UPDATE ecs_erp_orders o, (" +
+							" SELECT a.parent_id as id, SUM(IFNULL(a.weight,0)) as weight FROM ecs_erp_orders_details a" +
+							" WHERE a.comp_id=? AND a.parent_id = ?) c SET o.prdt_weight = c.weight WHERE o.comp_id = ? AND o.id = c.id AND o.id = ? ; ";
+					String sqlGiftDetail = "UPDATE ecs_erp_policies_gift_details SET gift_qty = gift_qty + ? WHERE comp_id = ? AND id = ? AND (gift_qty IS NULL OR max_qty IS NULL OR max_qty >= gift_qty ) ";
+					String memoInfo = OrderRemLogger.setMemoInfo(userCode, userName, DateUtils.getCurrentDateTime(), StringUtils.join("赠品策略自动添加赠品[", memoGift.toString(), "]"));
+					String concurrentSQL = "SELECT 1 FROM ecs_erp_orders_details o WHERE o.comp_id = ? AND o.parent_id = ? AND o.is_free = 1 AND o.gift_detail_id IS NOT NULL AND o.gift_detail_id > 0 ;";
+					if (!isStart && (isAgain == null || !isAgain)) {
+						isStart = true;
+						dao.StartTransaction();
+					}
+
+					if (null != dao.ExecuteScalar(concurrentSQL, new Object[]{compId, id})) {
+						logger.error("赠品策略分配并发回滚");
+						dao.RollbackTransaction();
+						return;
+					}
+
+					//先修改已赠送数量，看是否已并发修改已赠送数量
+					for (int i = 0; i < giftDetailList.size(); i++) {
+						int succ = dao.ExecuteNoneQuery(sqlGiftDetail, giftDetailList.get(i));
+						if (succ > 0) {
+							//增加增赠品明细
+							dao.ExecuteNoneQuery(sqlDetail, detailList.get(i));
+						}
+					}
+					//修改订单
+					dao.ExecuteNoneQuery(sqlOrder, new Object[]{compId, id, compId, id});
+					//加订单日志
+					dao.ExecuteNoneQuery(OrderRemLogger.getSqlMemoInfo(), new Object[]{id, compId, memoInfo, this.values.get("pay_time"), this.values.get("order_date")});
+					/*for (Long parentId : gifts.keySet()) {
+						//添加赠品策略日志
+						BzLogger.WriteLogs(compId, userId, userCode, userName,
+								BillType.PoliciesGift, parentId + "", "策略自动分配赠品到订单【订单号：" + order.get("site_trade_id") + ",主键：" + order.get("id") + "】");
+					}*/
+				}
+			}
+			if (isStart) {
+				AvailableStock stock = new AvailableStock(compId, logger);
+				//重新计算缺货
+				stock.lockTrans(this.id, true, dao);
+				dao.CommitTransaction();
+			}
+		} catch (SQLException e) {
+			try {
+				if (dao != null) {
+					dao.RollbackTransaction();
+				}
+			} catch (SQLException ignored) {
+			}
+			logger.error(e.getMessage());
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (Exception ignored) {
+				}
+			}
+		}
+	}
+
+	/**
+	 * 删除订单明细回滚赠品策略明细已赠送数量
+	 */
+	private void deleteGiftDetail(DAOEcsErpOrders dao) throws SQLException {
+		String sql = " SELECT o.gift_detail_id,o.qty,o.id FROM ecs_erp_orders_details o WHERE o.comp_id = ? AND o.parent_id = ? AND o.is_free = 1 AND o.gift_detail_id IS NOT NULL AND o.gift_detail_id > 0 ; ";
+		String sql1 = " UPDATE ecs_erp_policies_gift_details o SET o.gift_qty = o.gift_qty - ? WHERE o.comp_id = ? AND o.id = ? ; ";
+		String sql2 = "DELETE FROM ecs_erp_orders_details WHERE  comp_id = ?  AND id = ?; ";
+		ArrayList<Map<String, Object>> detailMap = dao.ExecuteReaderMaps(sql, new Object[]{compId, id});
+		if (detailMap != null && !detailMap.isEmpty()) {
+			for (Map<String, Object> map : detailMap) {
+				Long giftDetailId = StringUtils.toLong(map.get("gift_detail_id"));
+				if (!StringUtils.isEmpty(giftDetailId)) {
+					dao.ExecuteNoneQuery(sql1, new Object[]{StringUtils.toInteger(map.get("qty"),0),compId, giftDetailId});
+					dao.ExecuteNoneQuery(sql2, new Object[]{compId, map.get("id")});
+				}
+			}
+		}
+	}
+
+	/**
+	 * 赋值明细
+	 */
+	private List<Object> getDetail(EcsErpPoliciesGift gift, EcsErpSysPrdt prdt, Map<String, Object> order) {
+		List<Object> par = new ArrayList<>();
+		par.add(compId);
+		par.add(id);
+		par.add(id);
+		par.add(prdt.getId());
+		par.add(prdt.getPrdtCode());
+		par.add(prdt.getPrdtName());
+		par.add(prdt.getPrdtName());// erpOrdersDetails.getTitle()
+		par.add(prdt.getPropertiesName());// erpOrdersDetails.getPropertiesTitle()
+		par.add(prdt.getPropertiesName());
+		par.add(prdt.getSpc());
+		par.add(prdt.getUnitId());
+		// 已付款
+		par.add(order.get("transaction_status"));
+		// 网上交易状态
+		par.add(order.get("site_trans_status"));
+		par.add(true);
+		par.add(prdt.getIsMeal());
+		par.add(order.get("order_date"));
+		par.add(order.get("order_status"));
+		par.add(order.get("site_id"));
+		par.add(order.get("pro_order_status"));
+		par.add(prdt.getPrdtCode());// 订单变更和批量赠品一同把商品编码写到out_id中
+		par.add("由【"+gift.getPlyName()+"】赠品策略自动添加");
+		par.add(order.get("pay_time"));
+		return par;
+	}
+
+	private void success(EcsErpPoliciesGift policy) {
+		Map<String, Object> record = new HashMap<>();
+		record.put("id", policy.getId());
+		record.put("ply_name", policy.getPlyName());
+		record.put("status", true);
+		record.put("tip", "匹配成功：策略匹配成功");
+		testResult.add(record);
+	}
+
+	private void failure(EcsErpPoliciesGift policy, Map<String, Object> evn) {
+		Map<String, Object> record = new HashMap<>();
+		record.put("id", policy.getId());
+		record.put("ply_name", policy.getPlyName());
+		record.put("status", false);
+		List<Map<String, Object>> errorResult = validate(policy.getConditObj(), evn);
+		record.put("error", JSON.toJSONString(errorResult));
+		testResult.add(record);
+	}
+
+	private void failure(EcsErpPoliciesGift policy,String error) {
+		Map<String, Object> record = new HashMap<>();
+		record.put("id", policy.getId());
+		record.put("ply_name", policy.getPlyName());
+		record.put("status", false);
+		List<Map<String, Object>> errorResult = new ArrayList<>();
+		Map<String, Object> map = new HashMap<>();
+		map.put("key","exp_error");
+		map.put("value",error);
+		errorResult.add(map);
+		record.put("error", JSON.toJSONString(errorResult));
+		testResult.add(record);
+	}
+
+	private List<Map<String, Object>> validate(String co, Map<String, Object> evn) {
+		List<Map<String, Object>> error = new ArrayList<>();
+		if (StringUtils.isEmpty(co)) {
+			return error;
+		}
+		@SuppressWarnings("unchecked")
+		Map<String, Object> map = JSON.parseObject(co, Map.class);
+		for (String key : map.keySet()) {
+			String value = StringUtils.toString(map.get(key));
+			if (StringUtils.isEmpty(value) || key.endsWith("_value")) {
+				continue;
+			}
+
+			if ("amount".equals(key) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+			if ("post_fee".equals(key) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+			
+			if (("all_order_prdt_up".equals(key) || "any_order_prdt_up".equals(key)) && value.contains("cur_code")) {
+				value = value.replace("[", "'");
+				value = value.replace("]", "'");
+			}
+
+			if (value.contains("#")) {
+				value = value.replace("#", key);
+			} else {
+				value = StringUtils.join("'", value.replaceAll("'", ""), "'");
+				StringBuilder tt = new StringBuilder();
+
+				if ("provice".equals(key) || "city".equals(key) || "properties_name".equals(key) 
+						|| "properties_title".equals(key) || "street".equals(key) || "specifications".equals(key)
+						|| "buyer_message".equals(key) ) {
+					//包含
+					tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(", 1)");
+				} else if ("made_in".equals(key)) {
+					Integer madeInType = StringUtils.toInteger(map.get("made_in_type"), 1);
+					if (1 == madeInType) {
+						//包含
+						tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(", 1)");
+					} else {
+						tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(", 4)");
+					}
+				} else if ("all_prdt_codes".equals(key)){
+					tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(", 6)");
+				}else {
+					tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(", 2)");
+				}
+				value = tt.toString();
+			}
+			if (!this.exec(value, evn,co,compId)) {
+				Map<String, Object> e = new HashMap<>();
+				e.put("key", key);
+				e.put("exps", value);
+				e.put("value", evn.get(key));
+				error.add(e);
+			}
+		}
+		return error;
+	}
+
+	/**
+	 * 获取转汇率之后的金额
+	 * 把策略的金额转换为与订单相同币种的金额
+	 * @param date		转汇率的时间
+	 * @param target	策略币种
+	 * @param source	订单币种
+	 * @param amount	策略中的金额
+	 * @return			转换后策略的金额
+	 */
+	private static String getAmount(Date date,String source, String target,BigDecimal amount,Long compId){
+		BigDecimal rto = CurrencyUtils.betweenRto(date,compId,source,target);
+		if (rto.equals(BigDecimal.ZERO)){
+			return StringUtils.toString(amount);
+		}
+		return StringUtils.toString(amount.multiply(rto));
+	}
+
+	/**
+	 * exp表达式存在币种则转换为订单的币种
+	 */
+	private static String change(String exp, String conditObj, Map<String, Object> record,Long compId) {
+		if (conditObj.contains("amount") || conditObj.contains("post_fee") 
+				|| conditObj.contains("all_order_prdt_up") || conditObj.contains("any_order_prdt_up")
+				|| conditObj.contains("all_order_prdt_up_post_free") || conditObj.contains("any_order_prdt_up_post_free")) {
+			@SuppressWarnings("unchecked")
+			Map<String, Object> conditObjMap = JSON.parseObject(conditObj, Map.class);
+			if (conditObjMap.containsKey("amount")) {
+				exp = getExp(exp, "amount", conditObjMap.get("amount"), record,compId);
+			}
+			if (conditObjMap.containsKey("post_fee")) {
+				exp = getExp(exp, "post_fee", conditObjMap.get("post_fee"), record,compId);
+			}
+			if (conditObjMap.containsKey("all_order_prdt_up")) {
+				exp = getExp(exp, "all_order_prdt_up", conditObjMap.get("all_order_prdt_up"), record,compId);
+			}
+			if (conditObjMap.containsKey("any_order_prdt_up")) {
+				exp = getExp(exp, "any_order_prdt_up", conditObjMap.get("any_order_prdt_up"), record,compId);
+			}
+			if (conditObjMap.containsKey("all_order_prdt_up_post_free")) {
+				exp = getExp(exp, "all_order_prdt_up_post_free", conditObjMap.get("all_order_prdt_up_post_free"), record,compId);
+			}
+			if (conditObjMap.containsKey("any_order_prdt_up_post_free")) {
+				exp = getExp(exp, "any_order_prdt_up_post_free", conditObjMap.get("any_order_prdt_up_post_free"), record,compId);
+			}
+			return exp;
+		} else {
+			return exp;
+		}
+	}
+
+	/**
+	 * 获取表达式
+	 */
+	private static String getExp(String exp,String key,Object value, Map<String, Object> record,Long compId) {
+		if (key.equals("amount") || key.equals("post_fee") 
+				||  key.equals("all_order_prdt_up") ||  key.equals("any_order_prdt_up")
+				||  key.equals("all_order_prdt_up_post_free") ||  key.equals("any_order_prdt_up_post_free")) {
+			Date payTime = StringUtils.toDateTime(record.get("pay_time"));
+			Date orderDate = StringUtils.toDateTime(record.get("order_date"));
+			String orderCurCode = StringUtils.toString(record.get("cur_code"));
+			Date date = payTime == null ? orderDate : payTime;
+			String amountStr = StringUtils.toString(value);
+			List<String> amountList = StringUtils.toArrayString(amountStr, "&&");
+			String curCode = "CNY";
+			for (String s : amountList) {
+				if (s.contains("cur_code")) {
+					curCode = s.replace("(cur_code==[", "").replace("])", "");
+					break;
+				}
+			}
+			if (!curCode.equals(orderCurCode)) {
+				String amountExp = amountStr.replace("[" + curCode + "]", "'" + curCode + "'").replace("#", key);
+				for (String s : amountList) {
+					if (!s.contains("cur_code")) {
+						String newS = s;
+						String num = getNum(s);
+						newS = newS.replace(num,getAmount(date, curCode, orderCurCode, StringUtils.toBigDecimal(num),compId));
+						amountStr = amountStr.replace(s,newS);
+					}
+				}
+				String amountExpNew = amountStr.replace("[" + curCode + "]", "'" + orderCurCode + "'").replace("#", key);
+				exp = exp.replace(amountExp, amountExpNew);
+			}
+		}
+		return exp;
+	}
+
+	/**
+	 * 截取金额
+	 */
+	private static String getNum(String s){
+		Pattern pattern = Pattern.compile("[(|#|<|>|=|M|)]");
+		Matcher matcher = pattern.matcher(s);//正则表达式截取数量
+		return matcher.replaceAll("");
+	}
+
+	/**
+	 * 检测是否已经通过赠品策略分配了赠品
+	 */
+	private Boolean checkGift() {
+		for (Map<String, Object> orderDetail : orderDetails) {
+			if (StringUtils.toBoolean(orderDetail.get("is_free"), false) && !StringUtils.isEmpty(StringUtils.toLong("gift_detail_id"))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 6.申报策略匹配
+	 * @param isDefault		是否只取默认策略
+	 * @return
+	 */
+	public EcsErpSysPoliciesDeclare declare(boolean isDefault) {
+		EcsErpSysPoliciesModel models = EcsErpSysPoliciesCache.getSysPolicies(compId, 4);
+		EcsErpSysPoliciesDeclare declare = new EcsErpSysPoliciesDeclare();
+		if (models == null || models.getList().size() <= 0) {
+			errorMsg = "【策略为空，请先添加策略。】";
+			return declare;
+		}
+
+		this.values = this.getValues(0, false);
+
+		//如果订单为空则返回默认策略
+		if (null == values || values.isEmpty()) {
+			return declare;
+		}
+
+		this.values.put("is_default", true);
+
+		EcsErpSysPolicies defaultPolicies = new EcsErpSysPolicies();
+		for (EcsErpSysPolicies logPolicies : models.getList()) {
+			if (isTest && policiesIds != null && !policiesIds.contains(logPolicies.getId().toString())) {
+				continue;
+			}
+			//取默认策略
+			if (isDefault) {
+				if (StringUtils.toInteger(logPolicies.getPlyLevel(),-1) == 0) {
+					return getDeclare(logPolicies);
+				}
+				continue;
+			}
+			//获取默认策略最后匹配
+			if (StringUtils.toInteger(logPolicies.getPlyLevel(),-1) == 0) {
+				defaultPolicies = logPolicies;
+				continue;
+			}
+			String exp = logPolicies.getConditExpr();
+			boolean isAccord = true;
+			try {
+				if (this.exec(exp, this.values, logPolicies.getConditObj(),compId)) {
+					isAccord = false;
+					if (isTest) {
+						this.success(logPolicies);
+					}
+				} else {
+					if (isTest && logPolicies.getPlyLevel() != 0) {
+						this.failure(logPolicies, this.values);
+					}
+				}
+			} catch (Exception e) {
+				if (isTest) {
+					Map<String, Object> errorExp = new HashMap<>();
+					errorExp.put("id", logPolicies.getId());
+					errorExp.put("ply_name", logPolicies.getPlyName());
+					errorExp.put("wh_name", logPolicies.getWhName());
+					errorExp.put("level", logPolicies.getPlyLevel());
+					errorExp.put("logistics_wh_name", logPolicies.getLogisticsWhName());
+					errorExp.put("logistics_id", logPolicies.getLogisticsId());
+					errorExp.put("status", false);
+					List<Map<String, Object>> errorResult = new ArrayList<>();
+					Map<String, Object> errorMap = new HashMap<>(1);
+					errorMap.put("key", "exp_error");
+					errorMap.put("value", "策略表达式不正确,请重新修改后保存。");
+					errorResult.add(errorMap);
+					errorExp.put("error", JSON.toJSONString(errorResult));
+					testResult.add(errorExp);
+				} else {
+					logger.error("declare-compId:"+compId+",orderId:"+id, e);
+				}
+			}
+			if (!isAccord && !isTest) {
+				return getDeclare(logPolicies);
+			}
+		}
+		return getDeclare(defaultPolicies);
+	}
+
+	private EcsErpSysPoliciesDeclare getDeclare(EcsErpSysPolicies logPolicies) {
+		EcsErpSysPoliciesDeclare declare = new EcsErpSysPoliciesDeclare();
+		DruidPooledConnection con = null;
+		DAOEcsErpSysPolicies dao;
+		try {
+			if (null != logPolicies && null != logPolicies.getId()) {
+				dao = new DAOEcsErpSysPolicies(con = PoolConnection.getCompConnection(compId), compId);
+				declare = dao.getDeclareModel(logPolicies.getId());
+			}
+		} catch (SQLException e) {
+			logger.error("BizUtils.DownAutoWhAndLogistics:" + e.getMessage());
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (Exception ignored) {
+				}
+			}
+		}
+		return declare;
+	}
+
+	/**
+	 * 审核策略匹配成功修改订单的内部便签
+	 * @param logPolicies
+	 */
+	private void saveSticker(EcsErpSysPolicies logPolicies) {
+		if (logPolicies.getIsSticker() != null && logPolicies.getIsSticker()
+				&& !StringUtils.isEmpty(logPolicies.getSticker())) {
+			StringBuilder sql = new StringBuilder();
+			sql.append(" INSERT INTO ecs_erp_orders_rem(id,comp_id,pay_time,order_date,memo_sticker) VALUES(?,?,?,?,?) ");
+			sql.append(" ON DUPLICATE KEY UPDATE ");
+			sql.append(" memo_sticker = CONCAT(IFNULL(memo_sticker,''),VALUES(memo_sticker)) ");
+			DruidPooledConnection con = null;
+			DAOBase dao;
+			try {
+				dao = new DAOEcsErpSysPolicies(con = PoolConnection.getCompConnection(compId), compId);
+				dao.ExecuteNoneQuery(sql.toString(), new Object[]{id, compId, this.values.get("pay_time"), this.values.get("order_date"), ";" + logPolicies.getSticker()});
+			} catch (SQLException e) {
+				logger.error("BizUtils.DownAutoWhAndLogistics:" + e.getMessage());
+			} finally {
+				if (con != null) {
+					try {
+						con.close();
+					} catch (Exception ignored) {
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 *获取赠品策略的倍增倍数
+	 * @param gift        赠品策略
+	 * @param detailEvn		明细匹配策略的数据源
+	 */
+	@SuppressWarnings("unchecked")
+	private int getTimes(EcsErpPoliciesGift gift, List<Map<String, Object>> detailEvn) {
+		int times = 1;
+		Map<String, Object> conditExpr = JSON.parseObject(gift.getConditObj(), Map.class);
+		//取不到值，即为指定商品总数量没设置
+		//倍增倍数=订单中指定商品总数量/策略中指定商品总数量的最小值
+		String prdtTotalS = StringUtils.toString(conditExpr.get("prdt_total"));
+		if (!StringUtils.isEmpty(prdtTotalS)) {
+			Integer prdtTotal = StringUtils.toInteger(getNum(prdtTotalS.split("&&")[0]), 0);
+			if (prdtTotal > 0) {
+				Integer detailPrdtTotal = getPrdtTotal(gift);
+				times = (new Double(Math.floor(detailPrdtTotal / prdtTotal)).intValue());
+			}
+		} else {
+			//倍增倍数=订单商品行中,符合策略的商品条件的商品总数量
+			StringBuilder conditExprS = new StringBuilder();
+			getExp(conditExpr, conditExprS);
+			Integer prdtTotal = 0;
+			for (Map<String, Object> map : detailEvn) {
+				if (!StringUtils.toBoolean(map.get("is_free"), false) && this.exec(conditExprS.toString(), map, "",compId)) {
+					prdtTotal = prdtTotal + StringUtils.toInteger(map.get("qty"), 0);
+				}
+			}
+			times = prdtTotal;
+		}
+		if (times <= 0) {
+			times = 1;
+		}
+		return times;
+	}
+
+	/**
+	 * 获取明细匹配数据源
+	 */
+	private Map<String, Object> getEvn(Map<String, Object> detail) {
+		Map<String, Object> evn = new HashMap<>();
+		evn.put("made_in", "$" + StringUtils.toString(detail.get("location")) + "$");
+		evn.put("prdt_codes", "," + StringUtils.toString(detail.get("prdt_id")) + ",");
+		evn.put("all_prdt_codes", "," + StringUtils.toString(detail.get("prdt_id")) + ",");
+		evn.put("specifications", StringUtils.toString(detail.get("spc")) + ",");
+		//商品是否带插头
+		String is_with_plugs = StringUtils.toString(detail.get("is_with_plugs"));
+		if (!"true".equalsIgnoreCase(is_with_plugs.trim())) {
+			evn.put("is_with_plugs", 0);
+		} else {
+			evn.put("is_with_plugs", 1);
+		}
+		//用于运算
+		evn.put("qty", detail.get("qty"));
+		evn.put("is_free", detail.get("is_free"));
+		return evn;
+	}
+
+	/**
+	 * 获取明细匹配条件
+	 * 如果商品条件都没有则默认匹配
+	 */
+	private void getExp(Map<String, Object> conditObj, StringBuilder conditExpr) {
+		conditExpr.append("(true)").append("&&");
+		for (Map.Entry<String, Object> entry : conditObj.entrySet()) {
+			String key = entry.getKey();
+			String value = StringUtils.toString(entry.getValue());
+			if (StringUtils.isEmpty(value) || key.endsWith("_value") || !"made_in,prdt_codes,all_prdt_codes,specifications,is_with_plugs".contains(key)) {
+				continue;
+			}
+			if (value.contains("(#>") || value.contains("(#<") || value.contains("(#=")) {
+				value = value.replace("#", key);
+			} else {
+				value = StringUtils.join("'", value.replaceAll("'", ""), "'");
+				StringBuilder tt = new StringBuilder();
+
+				if ("specifications".equals(key)) {
+					//包含
+					tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(", 1)");
+				} else if ("all_prdt_codes".equals(key)) {
+					//订单所有商品包含
+					tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(",5)");
+				} else if ("made_in".equals(key)) {
+					Integer madeInType = StringUtils.toInteger(conditObj.get("made_in_type"), 1);
+					if (1 == madeInType) {
+						//包含
+						tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(", 1)");
+					} else {
+						//结尾
+						tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(", 4)");
+					}
+				} else {
+					tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(",2)");
+				}
+				value = tt.toString();
+			}
+			conditExpr.append("(").append(value).append(")").append("&&");
+		}
+		if (conditExpr.lastIndexOf("&&") != -1) {
+			conditExpr.delete(conditExpr.length() - 2, conditExpr.length());
+		}
+	}
+
+	public void addStock(Long id) {
+		if(id == null || id.longValue()<0){
+			return;
+		}
+		DruidPooledConnection con = null;
+		DAOEcsErpStock dao = null;
+		try {
+			dao = new DAOEcsErpStock(con = PoolConnection.getCompConnection(compId), compId);
+			List<Map<String,Object>> detailList = dao.ExecuteReaderMaps("select e.id,e.prdt_id,e.wh_id from ecs_erp_orders_details e where e.comp_id = ? and e.parent_id = ? ORDER BY e.prdt_id,e.wh_id", new Object[]{compId,id});
+			if(CollectionUtils.isEmpty(detailList)){
+				return;
+			}
+			dao.StartTransaction();
+			for(Map<String,Object> each : detailList){
+				Long prdtId = (Long)each.get("prdt_id");
+				Long whId = (Long)each.get("wh_id");
+				if(prdtId != null && whId != null){
+					dao.addQty(prdtId, whId, 0L, BigDecimal.ZERO);					
+				}
+			}
+			dao.CommitTransaction();
+		}catch(Exception ex){
+			logger.error("autoWhlogistics addStock error,Id:"+id+",errorMsg"+ex.getMessage());
+		}finally{
+			if(con != null){
+				try {
+					con.close();
+				} catch (SQLException e) {
+				}
+			}
+		}
+	}
+	
+	protected boolean matchPostCode(String area,String location, String postCode, String postBegin, String postEnd, Integer sptStart, Integer sptEnd) {
+		if(null != area && !StringUtils.isEmpty(location) && area.toUpperCase().indexOf(location.toUpperCase()) == -1){
+			return false;
+		}
+		
+		String postCodeSpt = sptPostCode(postCode, sptStart, sptEnd);
+		
+		Long pb = StringUtils.toLong(postBegin);
+		Long pe = StringUtils.toLong(postEnd);
+		Long pc = StringUtils.toLong(postCodeSpt);
+		
+		boolean match = false;
+		
+		if(null != pc && null != pb && null != pe){
+			match = pb <= pc && pe >= pc;
+		}else if(null != pc && null != pb && StringUtils.isEmpty(postEnd)){
+			pe = 9999999999L;
+			match = pb <= pc && pe >= pc;
+		}else if(null != pc && null != pe && StringUtils.isEmpty(postBegin)){
+			pb = 0L;
+			match = pb <= pc && pe >= pc;
+		}else{
+			if(StringUtils.isEmpty(postEnd)){
+				postEnd = "zzzzzzzzzz";
+			}
+			match = (StringUtils.isEmpty(postBegin) || postBegin.compareTo(postCodeSpt) <= 0) && postEnd.compareTo(postCodeSpt) >= 0;
+		}
+		return match;
+	}
+	
+	private static String sptPostCode(String postCode, Integer sptStart, Integer sptEnd) {
+		if(StringUtils.isEmpty(postCode)){
+			return postCode;
+		}
+		if(null == sptStart || sptStart == 0){
+			return postCode;
+		}
+		if(postCode.length() < sptStart){
+			return postCode;
+		}
+		int start = sptStart - 1;
+		
+		if(null == sptEnd || sptEnd < sptStart || postCode.length() < sptEnd){
+			return postCode.substring(start);
+		}
+		int end = sptEnd;
+		return postCode.substring(start, end);
+	}
+
+	/**
+	 * 新增美特多物流公司
+	 */
+	public boolean addLogistics(int logType) {
+		DruidPooledConnection con = null;
+		DAOEcsErpSysLogistics dao;
+		DAOEcsErpOrders daoOrder;
+		try {
+			dao = new DAOEcsErpSysLogistics(con = PoolConnection.getCompConnection(compId), this.compId);
+			daoOrder = new DAOEcsErpOrders(con, this.compId);
+			EcsErpOrders orders = daoOrder.getModel(id);
+
+			Long logisticsId = 0L;
+			if (StringUtils.isEmpty(orders.getLogisticsId())) {
+
+				boolean isLogistcs = false;
+				try {
+					Map<String, Object> map = this.getItemsResponseMap(this.compId, this.id, logType);
+                    String code = map.get("code")+"", name = map.get("name")+"";
+                    if (StringUtils.isEmpty(code) && StringUtils.isEmpty(name)) {
+						isLogistcs = true;
+					} else {
+						logisticsId = StringUtils.toLong(dao.ExecuteScalar("SELECT id FROM ecs_erp_sys_logistics" +
+								" WHERE comp_id = ? AND logistics_type = ? AND logistics_code = ? LIMIT 1",
+								new Object[]{compId, logType, code}));
+						//不存在物流公司则新增虚拟物流公司
+						if (logisticsId == null) {
+							EcsErpSysLogistics logistics = getLogistics(code, name, logType);
+							logisticsId = dao.add(logistics);
+						}
+					}
+				} catch (Exception e) {
+					isLogistcs = true;
+				}
+				if (isLogistcs) {
+					//默认给一个最新创建的物流公司
+					logisticsId = StringUtils.toLong(dao.ExecuteScalar("SELECT id FROM ecs_erp_sys_logistics " +
+							"WHERE comp_id = ? AND logistics_type = ? ORDER BY created DESC LIMIT 1",
+							new Object[]{compId, logType}));
+				}
+			} else {
+				logisticsId = orders.getLogisticsId();
+			}
+
+			WhCode.addLogisticsWh(logger, compId, orders.getWhId(), logisticsId);
+
+			if (StringUtils.isEmpty(orders.getLogisticsId())) {
+				return this.updateLogisticsId(logger, compId, id, logisticsId, new ArrayList<>());
+			} else {
+				return true;
+			}
+		} catch (SQLException e) {
+			logger.error("AutoWhlogistics addLogistics error,Id:" + id + ",errorMsg" + e.getMessage());
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (SQLException ignored) {
+				}
+			}
+		}
+		return true;
+	}
+
+	private EcsErpSysLogistics getLogistics(String code, String name, int logType) {
+		Date current = DateUtils.getCurrentDateTime();
+		EcsErpSysLogistics logistics = new EcsErpSysLogistics();
+		logistics.setLogisticsType(logType);
+		logistics.setLogisticsCode(code);
+		logistics.setLogisticsName(name);
+		logistics.setTimeType(1);
+		logistics.setIsTracking(true);
+		logistics.setCreated(current);
+        logistics.setIsAutoGetLabel(true);
+        logistics.setIsCreateOrderAfterConfirm(true);
+		logistics.setModified(current);
+		return logistics;
+	}
+
+
+	private Map<String,Object> getItemsResponseMap(Long compId, Long id, int logType) {
+		String itemsResponse = "";
+		DruidPooledConnection con = null;
+		DAOEcsBase dao = null;
+		try {
+			dao = new DAOEcsBase(con = PoolConnection.getCompConnection(compId), compId);
+			StringBuilder sql = new StringBuilder();
+			sql.append(" SELECT items_response");
+			sql.append(" FROM ecs_erp_orders_flags");
+			sql.append(" WHERE comp_id = ? AND id = ? LIMIT 1");
+			itemsResponse = (String) dao.ExecuteScalar(sql.toString(), new Object[]{compId, id});
+		} catch (Exception e) {
+			logger.error(e.getMessage(), e);
+		} finally {
+			if (con != null) {
+				try {
+					con.close();
+				} catch (SQLException ignored) {
+				}
+			}
+		}
+
+		if (StringUtils.isEmpty(itemsResponse)) {
+			return null;
+		}
+
+		//TODO 这里暂时兼容两种格式，后期清理。
+		Map itemMap = null;
+		if (itemsResponse.startsWith("{")) {
+			itemMap = JSONUtils.parseObject(itemsResponse, Map.class);
+		} else if (itemsResponse.startsWith("[")) {
+			List<Map> list = JSONUtils.parseArray(itemsResponse, Map.class);
+			if (list != null && !list.isEmpty()) {
+				itemMap = list.get(0);
+			}
+		}
+
+        String code = null;
+        String name = null;
+        if (itemMap != null && logType == LogisticsTypeEnum.Mercadolibre.value()) {
+            code = StringUtils.toString(itemMap.get("CarrierId"));
+            name = StringUtils.toString(itemMap.get("Description"));
+        }else if (itemMap != null && logType == LogisticsTypeEnum.MercadolibreGBL.value()){
+            code = StringUtils.toString(itemMap.get("tracking_method"));
+            name = StringUtils.toString(itemMap.get("mode_tracking_method"));
+        }
+        itemMap.put("code" , code);
+        itemMap.put("name" , name);
+		return itemMap;
+	}
+
+    /**
+     * 自动分配网店绑定的仓库
+     * @param siteId
+     * @param orderId
+     * @return
+     */
+    private Boolean autoSetMcbWH(Long siteId, Long orderId) {
+        Long compId = this.compId;
+        Long whId = 0l;
+        DruidPooledConnection con = null;
+        DAOEcsBase dao = null;
+        try {
+            dao = new DAOEcsBase(con = PoolConnection.getCompConnection(compId), compId);
+            StringBuilder sql = new StringBuilder();
+            sql.append(" SELECT wh_id");
+            sql.append(" FROM ecs_erp_sys_site");
+            sql.append(" WHERE comp_id = ? AND id = ? LIMIT 1");
+            whId = (Long) dao.ExecuteScalar(sql.toString(), new Object[]{compId, siteId});
+            if(whId != null){
+                StringBuilder sql2 = new StringBuilder();
+                sql2.append(" UPDATE");
+                sql2.append(" ecs_erp_orders ");
+                sql2.append(" SET wh_id = ?, modified = ? ");
+                sql2.append(" WHERE comp_id = ? AND id = ? ");
+                List<Object[]> params = new ArrayList<Object[]>();
+                 params.add(new Object[]{whId, DateUtils.getCurrentDateTime(), compId, orderId});
+                dao.ExecuteNoneQueryBatch(new BatchModel(sql2.toString(), params));
+                return true;
+            }else {
+                return false;
+            }
+        } catch (Exception e) {
+            logger.error(e.getMessage(), e);
+            return false;
+        } finally {
+            if (con != null) {
+                try {
+                    con.close();
+                } catch (SQLException ignored) {
+                }
+            }
+        }
+    }
+
+	/**
+	 * 匹配门牌号规则
+	 */
+	public EcsErpSysPoliciesDeclare doorplate(int index) {
+		EcsErpSysPoliciesDeclare declare = null;
+		EcsErpSysPoliciesModel models = EcsErpSysPoliciesCache.getSysPolicies(compId, 6);
+		if(index == 0){
+			if (models == null || models.getList().size() <= 0) {
+				errorMsg = "【策略为空，请先添加策略。】";
+				return declare;
+			}
+			
+			this.values = this.getValues(0, false);
+			
+			//如果订单为空则返回默认策略
+			if (null == values || values.isEmpty()) {
+				return declare;
+			}
+		}
+		List<EcsErpSysPolicies> policiesList = models.getList();
+		if(policiesList.size() <= index){
+			return declare;
+		}
+		for(int i = index ;i<policiesList.size();i++){
+			EcsErpSysPolicies logPolicies = policiesList.get(i);
+			if (isTest && policiesIds != null && !policiesIds.contains(logPolicies.getId().toString())) {
+				continue;
+			}
+
+			String exp = logPolicies.getConditExpr();
+			boolean isAccord = true;
+			try {
+				if (this.exec(exp, this.values, logPolicies.getConditObj(),compId)) {
+					isAccord = false;
+					if (isTest) {
+						this.success(logPolicies);
+					}
+				} else {
+					if (isTest && logPolicies.getPlyLevel() != 0) {
+						this.failure(logPolicies, this.values);
+					}
+				}
+			} catch (Exception e) {
+				if (isTest) {
+					Map<String, Object> errorExp = new HashMap<>();
+					errorExp.put("id", logPolicies.getId());
+					errorExp.put("ply_name", logPolicies.getPlyName());
+					errorExp.put("wh_name", logPolicies.getWhName());
+					errorExp.put("level", logPolicies.getPlyLevel());
+					errorExp.put("logistics_wh_name", logPolicies.getLogisticsWhName());
+					errorExp.put("logistics_id", logPolicies.getLogisticsId());
+					errorExp.put("status", false);
+					List<Map<String, Object>> errorResult = new ArrayList<>();
+					Map<String, Object> errorMap = new HashMap<>(1);
+					errorMap.put("key", "exp_error");
+					errorMap.put("value", "策略表达式不正确,请重新修改后保存。");
+					errorResult.add(errorMap);
+					errorExp.put("error", JSON.toJSONString(errorResult));
+					testResult.add(errorExp);
+				} else {
+					logger.error("declare-compId:"+compId+",orderId:"+id, e);
+				}
+			}
+			if (!isAccord && !isTest) {
+				declare = getDeclare(logPolicies);
+				declare.setTempIndex(i);
+				return declare;
+			}
+		}
+		return declare;
+	}
+	
+}

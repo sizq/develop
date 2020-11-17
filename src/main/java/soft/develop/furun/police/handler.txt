@@ -1,0 +1,251 @@
+/**
+	 * 新增策略信息
+	 */
+	public void Add(Map<String, Object> parameter) {
+		String whId = StringUtils.toString(parameter.get("wh_id"));
+		String whName = StringUtils.toString(parameter.get("wh_name"));
+		String plyType = StringUtils.toString(parameter.get("ply_type"));
+		String plyName = StringUtils.toString(parameter.get("ply_name"));
+		String conditObj = StringUtils.toString(parameter.get("condit_obj"));
+		String logistics_id = StringUtils.toString(parameter.get("logistics_id"));
+		String logistics_wh_id = StringUtils.toString(parameter.get("logistics_wh_id"));
+		String logistics_wh_name = StringUtils.toString(parameter.get("logistics_wh_name"));
+		String plyLevel = StringUtils.toString(parameter.get("ply_level"));
+		String position = StringUtils.toString(parameter.get("position"));
+		String startDate = StringUtils.toDateString(StringUtils.toDateTime(parameter.get("start_date")));
+		String endDate = StringUtils.toDateString(StringUtils.toDateTime(parameter.get("end_date")));
+		String signatureType = StringUtils.toString(parameter.get("signature_type"));
+		
+		StringBuffer sb = new StringBuffer();
+		StringBuffer validConditObj = new StringBuffer();
+		Map<String, String> keyMap = null;
+		keyMap = initKeyData(conditObj,validConditObj, sb, keyMap);
+
+		Map<String, String> params = new HashMap<String, String>();
+		if (sb.lastIndexOf("&&") != -1) {
+			params.put("condit_expr", sb.substring(0, sb.lastIndexOf("&&")));
+		}
+		if (keyMap != null) {
+			params.put("condit_key", this.toJSONString(keyMap));
+		}
+		params.put("wh_name", whName);
+		params.put("wh_id", whId);
+		params.put("ply_type", plyType);
+		params.put("ply_name", plyName.trim());
+		params.put("condit_obj", validConditObj.toString());
+		params.put("logistics_id", logistics_id);
+		params.put("logistics_wh_id", logistics_wh_id);
+		params.put("logistics_wh_name", logistics_wh_name);
+		params.put("ply_level", plyLevel);
+		params.put("position", position);
+		params.put("declare",StringUtils.toString(parameter.get("declare")));
+		params.put("is_sticker",StringUtils.toBoolean(parameter.get("is_sticker"),false).toString());
+		params.put("sticker",StringUtils.toString(parameter.get("sticker")));
+		Map parseObject = this.parseObject(conditObj, Map.class);
+		params.put("is_stk_desc",StringUtils.toString(parseObject.get("isDesc")));
+		params.put("thd_prdt_type",StringUtils.toString(parseObject.get("isFirstType")));
+		params.put("thd_prdt_code",StringUtils.toString(parseObject.get("isFirst")));
+		params.put("start_date", startDate);
+		params.put("end_date", endDate);
+		params.put("signature_type", signatureType);
+		Request req = this.getRequest();
+		req.setParams(params);
+		this.getResponse(this.getService(IEcsErpSysPolicies.class).add(req));
+	}
+
+	private Map<String, String> initKeyData(String conditObj,StringBuffer validConditObj, StringBuffer sb, Map<String, String> keyMap) {
+		if (!StringUtils.isEmpty(conditObj)) {
+			Map map = JSON.parseObject(conditObj, Map.class);
+			keyMap = new HashMap<String, String>();
+			Set set = map.keySet();
+			Iterator it = set.iterator();
+			List<String> removeKeys=new ArrayList<String>();
+			while (it.hasNext()) {
+				String key = StringUtils.toString(it.next());
+				String value = StringUtils.toString(map.get(key));
+				if(StringUtils.isEmpty(value)){
+					removeKeys.add(key);
+					if(!key.endsWith("_value")){
+						removeKeys.add(key+"_value");
+					}
+					continue;
+				}else if (key.endsWith("_value")){
+					continue;
+				}else if(key.equals("made_in_type")){
+					continue;
+				}else if(key.equals("other_description1_type")){
+					continue;
+				}else if(key.equals("receiver_zip_type")){
+					continue;
+				}else if(key.equals("isFirstType")||key.equals("isFirst")||key.equals("isDesc")||key.equals("countryType")){
+					continue;
+				}
+					
+				if ("amount".equals(key) && value.contains("cur_code")) {
+					keyMap.put("cur_code", value.substring(value.lastIndexOf("[")+1,value.lastIndexOf("]")));
+					value = value.replace("[", "'");
+					value = value.replace("]", "'");
+				}
+				if ("post_fee".equals(key) && value.contains("cur_code")) {
+					keyMap.put("cur_code", value.substring(value.lastIndexOf("[")+1,value.lastIndexOf("]")));
+					value = value.replace("[", "'");
+					value = value.replace("]", "'");
+				}
+				if (("all_order_prdt_up".equals(key) || "any_order_prdt_up".equals(key)) && value.contains("cur_code")) {
+					keyMap.put("cur_code", value.substring(value.lastIndexOf("[")+1,value.lastIndexOf("]")));
+					value = value.replace("[", "'");
+					value = value.replace("]", "'");
+				}
+				if (("all_order_prdt_up_post_free".equals(key) || "any_order_prdt_up_post_free".equals(key)) && value.contains("cur_code")) {
+					keyMap.put("cur_code", value.substring(value.lastIndexOf("[")+1,value.lastIndexOf("]")));
+					value = value.replace("[", "'");
+					value = value.replace("]", "'");
+				}
+				keyMap.put(key, key);
+				
+				if (value.contains("(#>") || value.contains("(#<") || value.contains("(#=")) {
+					if (key.contains("order_prdt_up") && !key.contains("post_free")){
+						keyMap.remove(key);
+						String minKey = "min_order_prdt_up";
+						String maxKey = "max_order_prdt_up";
+						keyMap.put(minKey, minKey);
+						keyMap.put(maxKey, maxKey);
+						if(key.contains("all_order_prdt_up")){
+							value = StringUtils.join(value.replace("#", minKey), "&&", value.replace("#", maxKey));
+						}else if(key.contains("any_order_prdt_up")){
+							value = StringUtils.join(value.replace("#", minKey), "||", value.replace("#", maxKey));
+						}
+					}else if(key.contains("order_prdt_up") && key.contains("post_free")){
+						keyMap.remove(key);
+						String minKey = "min_order_prdt_up_post_free";
+						String maxKey = "max_order_prdt_up_post_free";
+						keyMap.put(minKey, minKey);
+						keyMap.put(maxKey, maxKey);
+						if(key.contains("all_order_prdt_up")){
+							value = StringUtils.join(value.replace("#", minKey), "&&", value.replace("#", maxKey));
+						}else if(key.contains("any_order_prdt_up")){
+							value = StringUtils.join(value.replace("#", minKey), "||", value.replace("#", maxKey));
+						}
+					}
+					else{
+						value = value.replace("#", key);
+					}
+				}else if (key.equals("spc")){
+					keyMap.remove(key);
+					initSpcKey(keyMap, value);
+				 
+				}else if ("prdt_single".equals(key)){
+				}else{
+					value = StringUtils.join("\"", value, "\"");
+					
+					StringBuffer tt = new StringBuffer();
+					
+					if("provice".equals(key)||"city".equals(key) ||"properties_name".equals(key)||"properties_title".equals(key)||"street".equals(key) || "specifications".equals(key) || "logistics_way".equals(key)|| "buyer_message".equals(key)){
+						//包含
+						tt.append("EcsAviator.contains("+value+","+key+", 1)");
+					}else if("prdt_codes".equals(key) || "prdt_type".equals(key) || "prdt_logistics_type".equals(key) || "battery_type".equals(key) || "prdt_logistics_type".equals(key)){
+						//等于
+						 tt.append("EcsAviator.contains("+value+","+key+",2)");
+					}else if("all_prdt_codes".equals(key)){
+						//订单所有商品包含
+						tt.append("EcsAviator.contains("+value+","+key+",5)");
+					} else if ("other_description1".equals(key)) {
+						Integer description1Type = StringUtils.toInteger(map.get("other_description1_type"), 1);
+						if(1 == description1Type){
+							tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(",2)");
+						}else if(5 == description1Type){
+							tt.append("EcsAviator.contains(").append(value).append(",").append(key).append(",5)");
+						}
+					} else if("made_in".equals(key)){
+						Integer madeInType = StringUtils.toInteger(map.get("made_in_type"), 1);
+						if(1 == madeInType){
+							//包含
+							tt.append("EcsAviator.contains("+value+","+key+", 1)");
+						}else{
+							//结尾
+							tt.append("EcsAviator.contains("+value+","+key+", 4)");
+						}
+					}else if("receiver_zip".equals(key)){
+						Integer receiverZipType = StringUtils.toInteger(map.get("receiver_zip_type"), 1);
+						 if(1 == receiverZipType){
+							 tt.append("EcsAviator.contains("+value+","+key+", 1)");
+						 }else if(2 == receiverZipType){
+							 tt.append("EcsAviator.contains("+value+","+key+",2)");
+						 }else if(3 == receiverZipType){
+							 tt.append("EcsAviator.contains("+value+","+key+", 3)");
+						 }else if(4 == receiverZipType){
+							 tt.append("EcsAviator.contains("+value+","+key+", 4)");
+						 }
+					}else if("shipping_type".equals(key)){
+						tt.append("EcsAviator.contains("+value+","+key+", 2)");
+					}else if("country".equals(key)){
+						Integer countryType = StringUtils.toInteger(map.get("countryType"), 1);
+						if (1==countryType) {
+							tt.append("EcsAviator.contains("+value+","+key+", 1)");
+						}else if(2==countryType){
+							tt.append("EcsAviator.contains("+value+","+key+", 7)");
+						}
+					}else if("tool_type".equals(key)){
+						Integer toolTypeCond = StringUtils.toInteger(map.get("tool_type_cond"), 1);
+						 if(1 == toolTypeCond){
+							 tt.append("EcsAviator.contains("+value+","+key+", 1)");
+						 }else if(2 == toolTypeCond){
+							 tt.append("EcsAviator.contains("+value+","+key+",7)");
+						 }else if(3 == toolTypeCond){
+							 tt.append("EcsAviator.contains("+value+","+key+", 2)");
+						 }else if(4 == toolTypeCond){
+							 tt.append("EcsAviator.contains("+value+","+key+", 9)");
+						 }
+					}else if("tool_type_cond".equals(key)){
+						Integer toolTypeCond = StringUtils.toInteger(map.get("tool_type_cond"), 1);
+						if(5 == toolTypeCond){
+							tt.append("EcsAviator.contains("+"''"+","+"tool_type"+", 10)");
+							keyMap.put("tool_type", "tool_type");
+							map.put("tool_type", StringUtils.toString(map.get("tool_type")));
+						}else if(6 == toolTypeCond){
+							tt.append("EcsAviator.contains("+"''"+","+"tool_type"+", 11)");
+							keyMap.put("tool_type", "tool_type");
+							map.put("tool_type", StringUtils.toString(map.get("tool_type")));
+						}else{
+							continue;
+						}
+					}else{
+						tt.append("EcsAviator.contains("+value+","+key+", 2)");
+					}
+					value = tt.toString();
+				}
+				sb.append("(").append(value).append(")").append("&&");
+			}
+           //删除无效的key
+			for (String str : removeKeys) {
+				map.remove(str);
+			}
+			validConditObj.append(this.toJSONString(map));
+		}
+		return keyMap;
+	}
+
+
+	private void initSpcKey(Map<String, String> keyMap, String value) {
+		if(value.indexOf("length")!=-1){
+			keyMap.put("length", "length");
+		}
+		if(value.indexOf("width")!=-1){
+			keyMap.put("width", "width");
+		}
+		if(value.indexOf("height")!=-1){
+			keyMap.put("height", "height");
+		}
+		if(value.indexOf("girth")!=-1){
+			keyMap.put("girth", "girth");
+		}
+		if(value.indexOf("maxlen")!=-1){
+			keyMap.put("maxlen", "maxlen");
+		}
+		if(value.indexOf("minlen")!=-1){
+			keyMap.put("minlen", "minlen");
+		}
+		if(value.indexOf("lencric")!=-1){
+			keyMap.put("lencric", "lencric");
+		}
+	}
