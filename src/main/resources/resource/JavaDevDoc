@@ -81,6 +81,7 @@
 	};
 	
 10、密码MD5
+emgr.utils.common.MD5Utils
 public static void main(String[] args) {
 	String loginName = "开发账号";
 	String a = "sizhiqi110";
