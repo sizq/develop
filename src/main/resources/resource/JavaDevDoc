@@ -112,4 +112,35 @@ Date paymentDate = DateUtils.parseDate(StringUtils.toString(map.get("payment_dat
 
 13、返回json格式的map
 String msg = MessageBuilder.create().add("comp_id",41).toJSONString();
+
+
+
+14、写测试类
+public class TestPayoneer extends BaseTest{
+	private static final Logger logger = LoggerFactory.getLogger(TestPayoneer.class);;
+	@Before
+	public void initBase() {
+		/**
+		 * 使用BaseTest或者下边 二选一
+		 */
+		BaseTest test = new BaseTest();
+		test.init();
+		
+//		PoolConnection poolConnection = new PoolConnection();
+//		SysConstants.runMode = "test";
+//		SysConstants.APP_ROOT_PATH = "D:/project/develop/frdas-ecs-provider/frdas-provider/target";
+//		poolConnection.start("dbconfig.properties");
+//		MySQLConnections.start();
+
+	}
+	
+	@Test
+	public void testPayoneerBill() throws Exception {
+		JobCompBase job = new DownPayoneerBillJob();
+		Map<String,Object> map = new HashMap<>();
+		map.put("comp_id", 41);
+		job.execute( MessageBuilder.create().add("comp_id",41).toJSONString());
+
+	}
+}
 	

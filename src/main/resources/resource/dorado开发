@@ -26,3 +26,22 @@ JS中动态添加Colum
     	align : "center",
     	width:110
     });
+ 
+3、dataset添加字段校验
+<PropertyDef name="post_fee_back">
+        <Property name="dataType">BigDecimal</Property>
+        <Validator name="validator1" type="custom">
+          <ClientEvent name="onValidate">
+	          if(arg.data){&#xD;
+				var data = arg.data.toString();&#xD;
+				var moneyTest = /^[0-9]{1,6}(\.[0-9]{0,2})?$/;&#xD;
+				if(!moneyTest.test(data)){&#xD;
+					arg.result = {&#xD;
+				       text: &quot;退货运费只能输入最大6位整数，2位小数&quot;,&#xD;
+				       state: &quot;error&quot;&#xD;
+					};&#xD;
+				}&#xD;
+			 }
+		  </ClientEvent>
+        </Validator>
+      </PropertyDef>

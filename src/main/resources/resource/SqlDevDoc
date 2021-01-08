@@ -86,7 +86,11 @@ CASE WHEN energy <= (SELECT P_LIMIT FROM TABLE_PRICE WHERE P_LEVEL = 0) THEN (SE
 
 
 
-
+联表更新
+UPDATE ecs_erp_sys_prdt a
+LEFT JOIN ecs_erp_sys_cust b ON a.comp_id = b.comp_id AND a.cust_id = b.id 
+SET a.cust_name = b.cust_name ,modified = NOW()
+WHERE IFNULL(a.cust_id,'') <> '' AND IFNULL(a.cust_name,'') = '' AND a.comp_id <> 253;
 
 
 

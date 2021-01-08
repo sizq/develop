@@ -2,3 +2,28 @@
 var number = 1.89545595
 number = number.toFixed(2);//toFixed自带四舍五入的功能,toFixed自带补"0"位功能
 number.substr(0,number.indexOf(".")+3)//这种方式没有四舍五入的功能，直接按位截取的，也没有补位功能
+
+
+JS中操作cookie
+
+//添加cookie
+function addCookie(key, value, hours) {
+    var str = key + "=" + escape(value); //编码
+    if (hours > 0) {//为0时不设定过期时间，浏览器关闭时cookie自动消失
+        var date = new Date();
+        var ms = hours * 3600 * 1000;
+        date.setTime(date.getTime() + ms);
+        str += "; expires=" + date.toGMTString();
+    }
+    document.cookie = str;
+}
+
+//根据键获取cookie
+function getCookie(key) {//获取指定名称的cookie的值
+    var arrStr = document.cookie.split("; ");
+    for (var i = 0; i < arrStr.length; i++) {
+        var temp = arrStr[i].split("=");
+        if (temp[0] == key) return unescape(temp[1]);  //解码
+    }
+    return "";
+}
